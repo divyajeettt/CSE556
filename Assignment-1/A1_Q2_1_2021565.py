@@ -70,9 +70,9 @@ class BiGramLM:
         self.two_word_counts = Counter(pairs)
 
     def calculate_probs(self):
-        for word1 in self.tokenizer.vocabulary:
+        for word1 in self.tokenizer.tokens:
             self.conditional_log_probs[word1] = []
-            for word2 in self.tokenizer.vocabulary:
+            for word2 in self.tokenizer.tokens:
                 self.conditional_log_probs[word1].append(
                         (word2,self.conditional_prob(word1,word2))
                 )
@@ -85,7 +85,7 @@ class BiGramLM:
         if self.smoothing is None:
             prob = self.getfreq(word1,word2)/self.getfreq(word1)
         elif self.smoothing == 'laplace':
-            prob = (self.getfreq(word1,word2)+1)/(self.getfreq(word1)+len(self.tokenizer.vocabulary))
+            prob = (self.getfreq(word1,word2)+1)/(self.getfreq(word1)+len(self.tokenizer.tokens))
         elif self.smoothing == 'kneser-ney':
             #Hardcoded
             discount = 0.5
@@ -110,7 +110,7 @@ class BiGramLM:
         Generate a sentence from the language model
         '''
         if start is None:
-            start = np.random.choice(list(self.tokenizer.vocabulary.keys()))
+            start = np.random.choice(list(self.tokenizer.tokens))
         sentence = start
         last_token = self.tokenizer.tokenize(start)[-1]
         for i in range(num_words):
