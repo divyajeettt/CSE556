@@ -4,10 +4,12 @@ import A1_Q2_3_2021475 as Modified_LM
 import A1_Q2_1_2021565 as LM
 from utils import emotion_scores
 import os
+import shutil
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import GridSearchCV
 from sklearn.svm import SVC
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score,classification_report
+import sklearn
 
 NUM_EXAMPLES = 50
 
@@ -36,15 +38,20 @@ params = {
 }
 
 def main():
-    lm = LM.BiGramLM(raw,smoothing='kneser-ney')
+    num_merges = 800
+    lm = LM.BiGramLM(raw,smoothing='kneser-ney',num_merges=num_merges)
+
     emotion_token = {}
     for i in lm.tokenizer.tokens:
         emotion_token[i] = emotion_scores(i)
 
+    #delete the generated_examples folder if it exists
+    if os.path.exists(os.path.join(os.getcwd(), "generated_examples")):
+        shutil.rmtree(os.path.join(os.getcwd(), "generated_examples"))
     os.mkdir(os.path.join(os.getcwd(), "generated_examples"))
 
     for emotion in emotions.keys():
-        lm_e = Modified_LM.ModifiedBiGramLM(emotion,raw,emotion_token=emotion_token)
+        lm_e = Modified_LM.ModifiedBiGramLM(emotion,raw,emotion_token=emotion_token,num_merges=num_merges)
         if os.path.exists(os.path.join(os.getcwd(), "generated_examples", "gen_{emotion}.txt".format(emotion=emotion))):
             os.remove(os.path.join(os.getcwd(), "generated_examples", "gen_{emotion}.txt".format(emotion=emotion)))
         
@@ -74,15 +81,14 @@ def main():
 
     y_test_pred = grid_search.predict(X_test)
 
-
-    accuracy_test = accuracy_score(test_labels, y_test_pred)
-    print(f"Test Accuracy: {accuracy_test * 100:.2f}%")
+    #Print sklearn classification report
+    print(classification_report(test_labels, y_test_pred))
 
     with open('params.txt', 'w') as param_file:
         param_file.write(str(best_params))
 
     with open('metric.txt', 'w') as metric_file:
-        metric_file.write(f"Test Accuracy: {accuracy_test * 100:.2f}%")
+        metric_file.write(f"classification_report(test_labels, y_test_pred)")
 
 if __name__ == '__main__':
     main()
