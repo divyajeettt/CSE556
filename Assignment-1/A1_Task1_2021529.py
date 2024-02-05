@@ -17,8 +17,8 @@ class Tokenizer:
         self.merges = []
         self.pairs = collections.Counter()
 
-    def learn_vocabulary(self, corpus: list[str], num_merges: int) -> None:
-        self._fit(corpus)
+    def learn_vocabulary(self, corpus: list[str], num_merges: int, add_eos: bool|None = False) -> None:
+        self._fit(corpus, add_eos=add_eos)
         for _ in range(num_merges):
             self._make_pairs()
             pair = self.pairs.most_common(1)[0][0]
@@ -32,8 +32,10 @@ class Tokenizer:
             tokens = self._merge_word(tokens, pair)
         return tokens.split()
 
-    def _fit(self, corpus: list[str]) -> None:
+    def _fit(self, corpus: list[str], add_eos: bool) -> None:
         self.corpus = [" ".join(word) for word in corpus]
+        if add_eos:
+            self.corpus = [word + "$" for word in self.corpus]
         self.vocabulary = collections.Counter(self.corpus)
 
     def _make_pairs(self):
@@ -54,3 +56,38 @@ class Tokenizer:
         bigram = re.escape(" ".join(pair))
         merged = "".join(pair)
         return re.sub(bigram, merged, word)
+
+
+def main():
+    tokenizer = Tokenizer()
+    with open("Dataset/corpus.txt", "r") as file:
+        corpus = file.read()
+
+    N_MERGES = input("Input the number of merges: ")
+    try:
+        N_MERGES = int(N_MERGES)
+    except ValueError:
+        print("Invalid input. Please enter an integer.")
+        return
+    tokenizer.learn_vocabulary(corpus.split(), N_MERGES, add_eos=True)
+
+    # Save the merges
+    with open("Task-1-Results/merge_rules.txt", "w") as file:
+        for merge in tokenizer.merges:
+            file.write(f"{merge[0]},{merge[1]}\n")
+
+    # Save the tokens
+    with open("Task-1-Results/tokens.txt", "w") as file:
+        for token in sorted(tokenizer.tokens, key=len):
+            file.write(f"{token}\n")
+
+    # Save the tokenized samples
+    with open("Task-1-Results/tokenized_samples.txt", "w") as file:
+        for line in corpus.splitlines():
+            tokenized = tokenizer.tokenize(line)
+            file.write(",".join(tokenized))
+            file.write("\n")
+
+
+if __name__ == "__main__":
+    main()
