@@ -1,1 +1,12 @@
-classification_report(test_labels, y_test_pred)
+              precision    recall  f1-score   support
+
+       anger       0.53      0.18      0.27        50
+        fear       0.62      0.30      0.41        50
+         joy       0.41      0.72      0.52        50
+        love       0.96      0.94      0.95        50
+     sadness       0.54      0.76      0.63        50
+    surprise       0.88      0.92      0.90        50
+
+    accuracy                           0.64       300
+   macro avg       0.66      0.64      0.61       300
+weighted avg       0.66      0.64      0.61       300
