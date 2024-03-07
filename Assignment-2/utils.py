@@ -1,6 +1,6 @@
 import os
 import json
-import wandb
+import tqdm
 import torch
 import gensim
 import pickle
@@ -215,7 +215,7 @@ class BiLSTM_CRF(torch.nn.Module):
     pass
 
 
-def load_dataset(dataset: str, embedding: str) -> tuple[CustomDataset]:
+def load_dataset(dataset: str, embedding: str, verbose: bool) -> tuple[CustomDataset]:
     """
     Loads the given dataset and returns the train, test, and validation sets
     with the corresponding labels. It is expected that this function will be
@@ -223,9 +223,10 @@ def load_dataset(dataset: str, embedding: str) -> tuple[CustomDataset]:
     :params:
         - dataset: The dataset to load. Must be 'NER' or 'ATE' (case-insensitive).
         - embedding: The word-embedding to use. Must be 'Word2Vec', 'GloVe', or 'FastText' (case-insensitive).
+        - verbose: Whether to print the progress of the function or not.
     """
 
-    path = r"Assignment-2/Datasets/preprocessed/"
+    path = r"Datasets/preprocessed/"
     train_path, test_path, val_path = [
         os.path.join(path, dataset, f"{dataset}_{x}.json") for x in ["train", "test", "val"]
     ]
@@ -235,34 +236,38 @@ def load_dataset(dataset: str, embedding: str) -> tuple[CustomDataset]:
         test_data = json.load(test)
         val_data = json.load(val)
 
-    print("Loading Word Embeddings...")
+    if verbose:
+        print("Loading Word Embeddings...")
+
     if embedding == "word2vec":
-        model = "Assignment-2/Embeddings/GoogleNews-vectors-negative300.bin.gz"
+        model = "Embeddings/GoogleNews-vectors-negative300.bin.gz"
         embedding_model = gensim.models.KeyedVectors.load_word2vec_format(model, binary=True)
     elif embedding == "glove":
-        model = "Assignment-2/Embeddings/glove.42B.300d.bin.gz"
+        model = "Embeddings/glove.42B.300d.bin.gz"
         embedding_model = gensim.models.KeyedVectors.load_word2vec_format(model, binary=True)
     else:
-        model = "Assignment-2/Embeddings/cc.en.300.bin.gz"
+        model = "Embeddings/cc.en.300.bin.gz"
         embedding_model = gensim.models.fasttext.load_facebook_model(model).wv
 
-    print("Preprocessing Data...")
-    LABELS = set()
+    if verbose:
+        print("Preprocessing Data...")
+
+    labels = set()
     for data in train_data.values():
-        LABELS.update(data["labels"])
+        labels.update(data["labels"])
     encoder = LabelEncoder()
-    encoder.fit(sorted(LABELS))
+    encoder.fit(sorted(labels))
 
-    DATA = [[], []], [[], []], [[], []]
+    data = [[], []], [[], []], [[], []]
     for i, dataset in enumerate([train_data, test_data, val_data]):
-        for data in dataset.values():
-            DATA[i][0].append(data["text"].split())
-            DATA[i][1].append(data["labels"])
-    (TRAIN_DATA, TRAIN_LABELS), (TEST_DATA, TEST_LABELS), (VAL_DATA, VAL_LABELS) = DATA
+        for entry in dataset.values():
+            data[i][0].append(entry["text"].split())
+            data[i][1].append(entry["labels"])
+    (train_data, train_labels), (test_data, test_labels), (val_data, val_labels) = data
 
-    train_set = CustomDataset(TRAIN_DATA, TRAIN_LABELS, encoder, embedding_model)
-    test_set = CustomDataset(TEST_DATA, TEST_LABELS, encoder, embedding_model)
-    val_set = CustomDataset(VAL_DATA, VAL_LABELS, encoder, embedding_model)
+    train_set = CustomDataset(train_data, train_labels, encoder, embedding_model)
+    test_set = CustomDataset(test_data, test_labels, encoder, embedding_model)
+    val_set = CustomDataset(val_data, val_labels, encoder, embedding_model)
 
     return train_set, test_set, val_set
 
@@ -282,95 +287,124 @@ def get_embedding_matrix(embedding: WordEmbedding) -> torch.Tensor:
     return embedding_matrix
 
 
-def check_configs(configs: dict[str, Any]) -> None:
+def check_config(config: dict[str, Any]) -> None:
     """
     Checks the given configurations for any invalid values. The configurations
     expected are listed in help(pipeline).
     """
 
     dataset_err = "Invalid dataset. Must be 'NER' or 'ATE'."
-    condfigs["dataset"] = configs.get("dataset", "").upper()
-    assert configs["dataset"] in ["NER", "ATE"], dataset_err
+    config["dataset"] = config.get("dataset", "").upper()
+    assert config["dataset"] in ["NER", "ATE"], dataset_err
 
     embedding_err = "Invalid embedding. Must be 'Word2Vec', 'GloVe', or 'FastText'."
-    configs["embedding"] = configs.get("embedding", "").casefold()
-    assert configs["embedding"] in ["word2vec", "glove", "fasttext"], embedding_err
+    config["embedding"] = config.get("embedding", "").casefold()
+    assert config["embedding"] in ["word2vec", "glove", "fasttext"], embedding_err
 
     model_err = "Invalid model. Must be 'RNN', 'LSTM', 'GRU', or 'BiLSTM-CRF'."
-    configs["model"] = configs.get("model", "").casefold()
-    assert configs["model"] in ["rnn", "lstm", "gru", "bilstm-crf"], model_err
+    config["model"] = config.get("model", "").casefold()
+    assert config["model"] in ["rnn", "lstm", "gru", "bilstm-crf"], model_err
 
     batch_size_err = "Batch size must be a positive integer."
-    configs["batch_size"] = configs.get("batch_size", 0)
-    assert type(configs["batch_size"]) is int and configs["batch_size"] > 0, batch_size_err
+    config["batch_size"] = config.get("batch_size", 0)
+    assert type(config["batch_size"]) is int and config["batch_size"] > 0, batch_size_err
 
     epochs_err = "Number of epochs must be a positive integer."
-    configs["epochs"] = configs.get("epochs", 0)
-    assert type(configs["epochs"]) is int and configs["epochs"] > 0, epochs_err
+    config["epochs"] = config.get("epochs", 0)
+    assert type(config["epochs"]) is int and config["epochs"] > 0, epochs_err
 
     lr_err = "Learning rate must be a float in (0.0, 1.0]."
-    configs["lr"] = configs.get("lr", 0.0)
-    assert type(configs["lr"]) is float and 0.0 < configs["lr"] <= 1.0, lr_err
+    config["lr"] = config.get("lr", 0.0)
+    assert type(config["lr"]) is float and 0.0 < config["lr"] <= 1.0, lr_err
 
     criterion_err = "Invalid criterion. Must be 'NLLLoss', 'CrossEntropy', or 'CRF'."
-    configs["criterion"] = configs.get("criterion", "").casefold()
-    assert configs["criterion"] in ["nllloss", "crossentropy", "crf"], criterion_err
+    config["criterion"] = config.get("criterion", "").casefold()
+    assert config["criterion"] in ["nllloss", "crossentropy", "crf"], criterion_err
 
     optimizer_err = "Invalid optimizer. Must be 'Adam', 'Adagrad', or 'SGD'."
-    configs["optimizer"] = configs.get("optimizer", "").casefold()
-    assert configs["optimizer"] in ["adam", "adagrad", "sgd"], optimizer_err
+    config["optimizer"] = config.get("optimizer", "").casefold()
+    assert config["optimizer"] in ["adam", "adagrad", "sgd"], optimizer_err
 
     hyperparams_err = "Hyperparameters must be a dictionary."
-    configs["hyperparams"] = configs.get("hyperparams", {})
-    assert type(configs["hyperparams"]) is dict, hyperparams_err
+    config["hyperparams"] = config.get("hyperparams", {})
+    assert type(config["hyperparams"]) is dict, hyperparams_err
 
-    configs["verbose"] = configs.get("verbose", False)
+    config["device"] = config.get("device", "cpu")
+    try:
+        config["device"] = torch.device(config["device"])
+    except Exception as err:
+        print("Invalid device. ERROR:", err)
+        print("Using default device: 'cpu'.")
+        config["device"] = torch.device("cpu")
+
+    config["early_stopping_patience"] = config.get("early_stopping_patience", float("inf"))
+    config["verbose"] = config.get("verbose", False)
 
 
 def train(
         model: torch.nn.Module, train_loader: torch.utils.data.DataLoader, val_loader: torch.utils.data.DataLoader,
-        optimizer: torch.optim.Optimizer, criterion: torch.nn.Module, epochs: int, verbose: bool
+        optimizer: torch.optim.Optimizer, criterion: torch.nn.Module, epochs: int, patience: int, verbose: bool
     ) -> None:
     """
     Trains the given model using the given configurations. It is expected
     that this function is run through the pipeline after the configurations
     have been checked.
+    Ideally, model should be RNN|LSTM|GRU|BiLSTM_CRF.
     """
 
-    wandb.watch(model, criterion, log="all", log_freq=5)
-
     num_classes = len(train_loader.dataset.encoder.classes_)
-    best_val_loss = float("inf")
-    patience, counter = 3, 0
+    best_val_loss, counter = float("inf"), 0
 
-    for epoch in range(1, epochs+1):
+    device = next(model.parameters()).device
+    model.LOSSES = torch.zeros(epochs, 2)
+    model.F1_SCORES = torch.zeros(epochs, 2)
+
+    progress_bar = tqdm.tqdm(range(epochs), bar_format=r"{l_bar}{bar:15}{r_bar}")
+    for epoch in progress_bar if verbose else range(epochs):
         model.train()
-        train_details = run_epoch(model, train_loader, optimizer, criterion, num_classes, evaluate=False)
+        train_loss, train_true, train_predicted = 0, [], []
+        for data, labels in train_loader:
+            output = model(data).permute(0, 2, 1)
+            mask = (data != 0)
+            labels = labels * mask
+            output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
+            train_loss += (loss := criterion(output, labels)).item()
+            train_true.extend(labels.flatten().tolist())
+            train_predicted.extend(output.argmax(dim=1).flatten().tolist())
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+        model.eval()
         with torch.no_grad():
-            model.eval()
-            val_details = run_epoch(model, val_loader, optimizer, criterion, num_classes, evaluate=True)
+            val_loss, val_true, val_predicted = 0, [], []
+            for data, labels in val_loader:
+                output = model(data).permute(0, 2, 1)
+                mask = (data != 0)
+                labels = labels * mask
+                output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
+                val_loss += (loss := criterion(output, labels)).item()
+                val_true.extend(labels.flatten().tolist())
+                val_predicted.extend(output.argmax(dim=1).flatten().tolist())
+
+        model.LOSSES[epoch, 0] = train_loss / len(train_loader)
+        model.LOSSES[epoch, 1] = val_loss / len(val_loader)
+        model.F1_SCORES[epoch, 0] = metrics.f1_score(train_true, train_predicted, average="macro")
+        model.F1_SCORES[epoch, 1] = metrics.f1_score(val_true, val_predicted, average="macro")
+
         if verbose:
-            epoch = f"[Epoch: {epoch}/{epochs}]"
-            train = f"Loss: {train_details['loss']:.5f}, F1-Score: {train_details['f1']:.5f}"
-            val = f"Loss: {val_details['loss']:.5f}, F1-Score: {val_details['f1']:.5f}"
-            print(f"{epoch} Train: {train}, Validation: {val}", end="\r")
+            train = f"Loss: {model.LOSSES[epoch, 0]:.5f}, F1-Score: {model.F1_SCORES[epoch, 0]:.5f}"
+            val = f"Loss: {model.LOSSES[epoch, 1]:.5f}, F1-Score: {model.F1_SCORES[epoch, 1]:.5f}"
+            progress_bar.set_postfix_str(f"[Train: {train}], [Validation: {val}]")
 
         if val_loss < best_val_loss:
             best_val_loss, counter = val_loss, 0
         else:
             if (counter := counter + 1) >= patience:
                 print(f"\nEarly Stopping at Epoch {epoch}.")
+                model.LOSSES = model.LOSSES[:epoch + 1]
+                model.F1_SCORES = model.F1_SCORES[:epoch + 1]
                 break
-
-        wandb.log({
-            "Train Loss": train_details["loss"],
-            "Train F1-Score": train_details["f1"],
-            "Validation Loss": val_details["loss"],
-            "Validation F1-Score": val_details["f1"]
-        }, step=epoch)
-
-    if verbose:
-        print("\nTraining Complete.")
 
 
 def evaluate(
@@ -380,67 +414,41 @@ def evaluate(
     Evaluates the given model using the given configurations. It is expected
     that this function is run through the pipeline after the configurations
     have been checked. Returns the evaluation metrics for the given test set.
-    Also sets the confusion matrix as a heatmap on a plot.
+    Ideally, model should be RNN|LSTM|GRU|BiLSTM_CRF.
     """
 
-    model.eval()
     num_classes = len(dataloader.dataset.encoder.classes_)
+    device = next(model.parameters()).device
+    model.eval()
     with torch.no_grad():
-        details = run_epoch(model, dataloader, None, criterion, num_classes, evaluate=True)
+        test_loss, test_true, test_predicted = 0, [], []
+        for data, labels in dataloader:
+            output = model(data).permute(0, 2, 1)
+            mask = (data != 0)
+            labels = labels * mask
+            output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
+            test_loss += (loss := criterion(output, labels)).item()
+            test_true.extend(labels.flatten().tolist())
+            test_predicted.extend(output.argmax(dim=1).flatten().tolist())
 
-    print(f"Test Loss: {details['loss']:.5f}")
-    print(
-        f"Accuracy: {details['accuracy']:.5f}, Precision: {details['precision']:.5f}"
-        f", Recall: {details['recall']:.5f}, F1-Score: {details['f1']:.5f}"
-    )
-
-    sns.set_theme(style="darkgrid"))
-    plt.figure(figsize=(5, 4))
-    sns.heatmap(details["cf"], vmin=0.0, vmax=1.0)
-
-    return details
-
-
-def run_epoch(
-        model: torch.nn.Module, dataloader: torch.utils.data.DataLoader, optimizer: torch.optim.Optimizer,
-        criterion: torch.nn.Module, num_classes: int, evaluate: bool
-    ) -> dict[str, float|torch.Tensor]:
-    """
-    Runs a single epoch of training or validation. The model is trained
-    if evaluate is False, and evaluated if evaluate is True. Returns the
-    evaluation metrics for the given epoch.
-    """
-
-    epoch_loss, true, predicted = 0, [], []
-    for data, labels in dataloader:
-        output = model(data).permute(0, 2, 1)
-        mask = (data != 0)
-        labels = labels * mask
-        output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
-        epoch_loss += (loss := criterion(output, labels)).item()
-        true.extend(labels.flatten().tolist())
-        predicted.extend(output.argmax(dim=1).flatten().tolist())
-        if not evaluate:
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-
-    accuracy = metrics.accuracy_score(true, predicted)
-    precision = metrics.precision_score(true, predicted, average="macro")
-    recall = metrics.recall_score(true, predicted, average="macro")
-    f1 = metrics.f1_score(true, predicted, average="macro")
-
-    cf_matrix = metrics.confusion_matrix(true, predicted)
-    cf_matrix = cf_matrix / cf_matrix.sum(axis=1, keepdims=True)
-    cf_matrix = torch.round(torch.tensor(cf_matrix, dtype=torch.float32), decimals=5)
-
-    return {
-        "loss": epoch_loss / len(dataloader), "accuracy": accuracy,
-        "precision": precision, "recall": recall, "f1": f1, "cf": cf_matrix
+    test_details = {
+        "loss": test_loss / len(dataloader),
+        "accuracy": metrics.accuracy_score(test_true, test_predicted),
+        "precision": metrics.precision_score(test_true, test_predicted, average="macro"),
+        "recall": metrics.recall_score(test_true, test_predicted, average="macro"),
+        "f1": metrics.f1_score(test_true, test_predicted, average="macro"),
+        "cf": metrics.confusion_matrix(test_true, test_predicted, normalize="true")
     }
 
+    print(f"Test Loss: {test_details['loss']:.5f}")
+    print(
+        f"Accuracy: {test_details['accuracy']:.5f}, Precision: {test_details['precision']:.5f}"
+        f", Recall: {test_details['recall']:.5f}, F1-Score: {test_details['f1']:.5f}"
+    )
+    return test_details
 
-def pipeline(configs: dict[str, Any]) -> None:
+
+def pipeline(config: dict[str, str|float|dict[str, int]]) -> dict[str, Any]:
     """
     The pipeline works in 3 steps:
         - Performing configuration checks
@@ -450,7 +458,7 @@ def pipeline(configs: dict[str, Any]) -> None:
     Trains the required model using the given configurations. To train any model for this
     assignment, pass the configurations to this function. The pipeline will train, save,
     and evaluate the model.
-    :param configs: A dictionary containing the configurations for training a model.
+    :param config: A dictionary containing the configurations for training a model.
     The dictionary must define the following keys:
         - model: The model to train. Must be 'RNN', 'LSTM', 'GRU', or 'BiLSTM-CRF'.
         - dataset: The dataset to use. Must be 'NER' or 'ATE'.
@@ -461,41 +469,104 @@ def pipeline(configs: dict[str, Any]) -> None:
         - criterion: The loss function to use. Must be 'NLLLoss', 'CrossEntropyLoss', or 'CRF'.
         - optimizer: The optimizer to use. Must be 'Adam', 'Adagrad', or 'SGD'.
         - hyperparams: A dictionary containing the hyperparameters for the model. This
-            must match the hyperparams expected by the model.
+            must match the hyperparams expected by the model. The output_size and
+            embedding_matrix will be added to this dictionary automatically.
+        - device: The device to use for training. Default is 'cpu'.
+    Optionally, the dictionary may also specify:
+        - early_stopping_patience: The number of epochs to wait before stopping the training
+            early (based on validation loss).
         - verbose: Whether to print the training progress or not. Default is False.
     Note: All values are case-insensitive.
+
+    Returns a dictionary containing the trained model, the train, test, and validation dataloaders,
+    and a dictionary of evaluation metrics for the test set.
     """
 
-    check_configs(configs)
+    check_config(config)
 
-    train_set, test_set, val_set = load_dataset(configs["dataset"], configs["embedding"])
+    train_set, test_set, val_set = load_dataset(config["dataset"], config["embedding"], config["verbose"])
     embedding_matrix = get_embedding_matrix(train_set.embedding)
 
-    hyperparams = configs.get("hyperparams", {})
+    hyperparams = config.get("hyperparams", {})
     hyperparams["embedding_matrix"] = embedding_matrix
-    model_name = configs["model"]
+    hyperparams["output_size"] = len(train_set.encoder.classes_)
+    model_name = config["model"]
     model = {"rnn": RNN, "lstm": LSTM, "gru": GRU, "bilstm-crf": BiLSTM_CRF}[model_name](**hyperparams)
 
-    batch_size = configs["batch_size"]
+    batch_size = config["batch_size"]
     train_loader = torch.utils.data.DataLoader(train_set, batch_size=batch_size, shuffle=True)
     test_loader = torch.utils.data.DataLoader(test_set, batch_size=batch_size, shuffle=False)
     val_loader = torch.utils.data.DataLoader(val_set, batch_size=batch_size, shuffle=False)
 
-    criterion = configs["criterion"]
-    criterion = {"nllloss": nn.NLLLoss, "crossentropyloss": nn.CrossEntropyLoss, "crf": None}[criterion]()
+    criterion = config["criterion"]
+    criterion = {"nllloss": torch.nn.NLLLoss, "crossentropyloss": torch.nn.CrossEntropyLoss, "crf": None}[criterion]()
 
-    optimizer = configs["optimizer"]
+    optimizer = config["optimizer"]
     optimizer = {"adam": torch.optim.Adam, "adagrad": torch.optim.Adagrad, "sgd": torch.optim.SGD}[optimizer]
-    optimizer = optimizer(model.parameters(), lr=lr)
+    optimizer = optimizer(model.parameters(), lr=config["lr"])
 
-    task = "t1" if configs["dataset"] == "NER" else "t2"
-    run = f"{task}_{model_name}_{configs['embedding']}"
+    task = "t1" if config["dataset"] == "NER" else "t2"
+    run = f"{task}_{model_name}_{config['embedding']}"
 
-    with wandb.init(project=run, config=hyperparams):
-        train(model, train_loader, val_loader, optimizer, criterion, configs["epochs"], configs["verbose"])
-        test_details = evaluate(model, test_loader, criterion)
-        model_path = fr"Assignment-2/Models/{run}.pt"
-        torch.save(model.state_dict(), model_path)
-        with open(fr"Assignment-2/Models/{run}.pkl", "wb") as file:
-            pickle.dump(test_details, file)
-        plt.show()
+    model.to(config["device"])
+    train(
+        model, train_loader, val_loader, optimizer, criterion,
+        config["epochs"], config["early_stopping_patience"], config["verbose"]
+    )
+    test_details = evaluate(model, test_loader, criterion)
+    model_path = fr"Models/{run}.pt"
+    torch.save(model.state_dict(), model_path)
+    with open(fr"Models/{run}.pkl", "wb") as file:
+        pickle.dump(test_details, file)
+
+    return {
+        "model": model, "encoder": train_set.encoder, **test_details,
+        "train_loader": train_loader, "test_loader": test_loader, "val_loader": val_loader,
+    }
+
+
+def plot_learning_curve(model: torch.nn.Module) -> None:
+    """
+    Plots the loss and F1-score curves for the given model. The model must
+    have been trained and must have a LOSSES and F1_SCORES attribute.
+    Ideally, model should be RNN|LSTM|GRU|BiLSTM_CRF.
+    """
+
+    fig, ax = plt.subplots(1, 2, figsize=(15, 5))
+    ax[0].plot(model.LOSSES[:, 0], label="Train Loss")
+    ax[0].plot(model.LOSSES[:, 1], label="Validation Loss")
+    ax[0].set_title("Loss Curve")
+    ax[0].set_xlabel("Epochs")
+    ax[0].set_ylabel("Loss")
+    ax[0].grid(True)
+    ax[0].legend()
+
+    ax[1].plot(model.F1_SCORES[:, 0], label="Train F1-Score")
+    ax[1].plot(model.F1_SCORES[:, 1], label="Validation F1-Score")
+    ax[1].set_title("F1-Score Curve")
+    ax[1].set_xlabel("Epochs")
+    ax[1].set_ylabel("Macro F1-Score")
+    ax[1].grid(True)
+    ax[1].legend()
+
+    plt.show()
+
+
+def plot_confusion_matrix(confusion_matrix, labels: list[str]|None = None) -> None:
+    """
+    Plots the given confusion matrix. It is expected that the confusion
+    matrix is normalized. Optionally, the labels for the classes can be
+    passed to the function.
+    """
+
+    sns.set_theme(style="darkgrid")
+    plt.figure(figsize=(7, 6))
+    sns.heatmap(confusion_matrix, vmin=0.0, vmax=1.0)
+    plt.title("Normalized Confusion Matrix")
+    plt.xlabel("Predicted Labels")
+    plt.ylabel("True Labels")
+    if labels is not None:
+        N = len(labels)
+        plt.xticks(ticks=torch.arange(N) + 0.55, labels=labels, fontsize=8)
+        plt.yticks(ticks=torch.arange(N) + 0.55, labels=labels, fontsize=8)
+    plt.show()
