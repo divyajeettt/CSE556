@@ -126,8 +126,8 @@ class RNN(torch.nn.Module):
 
 class LSTM(torch.nn.Module):
     """
-    A class for the LSTM model. The model can be used for both NER
-    and ATE datasets. The model design is simply:
+    A class for the LSTM model. The model can be used for both NER and
+    ATE datasets. The model design is simply:
         - An embedding layer
         - 'num_layers' number of LSTM layers
         - A fully connected layer with 'output_size' number of units
@@ -171,8 +171,8 @@ class LSTM(torch.nn.Module):
 
 class GRU(torch.nn.Module):
     """
-    A class for the GRU model. The model can be used for both NER
-    and ATE datasets. The model design is simply:
+    A class for the GRU model. The model can be used for both NER and ATE
+    datasets. The model design is simply:
         - An embedding layer
         - 'num_layers' number of GRU layers
         - A fully connected layer with 'output_size' number of units
@@ -212,7 +212,37 @@ class GRU(torch.nn.Module):
 
 
 class BiLSTM_CRF(torch.nn.Module):
-    pass
+    """
+    A class for the GRU model. The model can be used for both NER and ATE
+    datasets. The model design is simply:
+        - An embedding layer
+        - TO-BE-IMPLEMENTED
+
+    The embedding matrix is the word-embedding matrix given by the chosen
+    embedding model and must have an additional row for the <UNK> token
+    (will be added to your hyperparameters automatically through the pipeline).
+    """
+
+    # parameter: type
+    embedding_matrix: torch.Tensor
+
+    # [ideally, match the signature of the other models - RNN, LSTM, GRU]
+    # must at least have the embedding matrix as a parameter (due to data preprocessing)
+    def __init__(self, embedding_matrix, /, *args):
+        super(BiLSTM_CRF, self).__init__()
+        self.embedding = torch.nn.Embedding.from_pretrained(embedding_matrix)
+        # TO-BE-IMPLEMENTED
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        The forward pass of the model. Must return the log probabilities of the
+        output classes for each word for each sentence in the batch (assuming
+        BiLSTM-CRF works in the same way).
+        x.shape = (batch_size, max_sentence_length)
+        out.shape = (batch_size, max_sentence_length, num_classes)
+        """
+        # TO-BE-IMPLEMENTED
+        pass
 
 
 def load_dataset(dataset: str, embedding: str, verbose: bool) -> tuple[CustomDataset]:
@@ -532,6 +562,8 @@ def plot_learning_curve(model: torch.nn.Module) -> None:
     Ideally, model should be RNN|LSTM|GRU|BiLSTM_CRF.
     """
 
+    sns.set_theme(style="darkgrid")
+
     fig, ax = plt.subplots(1, 2, figsize=(15, 5))
     ax[0].plot(model.LOSSES[:, 0], label="Train Loss")
     ax[0].plot(model.LOSSES[:, 1], label="Validation Loss")
@@ -552,7 +584,7 @@ def plot_learning_curve(model: torch.nn.Module) -> None:
     plt.show()
 
 
-def plot_confusion_matrix(confusion_matrix, labels: list[str]|None = None) -> None:
+def plot_confusion_matrix(confusion_matrix, labels: list[str]|None = None, size: tuple[int] = (7, 6)) -> None:
     """
     Plots the given confusion matrix. It is expected that the confusion
     matrix is normalized. Optionally, the labels for the classes can be
@@ -560,7 +592,7 @@ def plot_confusion_matrix(confusion_matrix, labels: list[str]|None = None) -> No
     """
 
     sns.set_theme(style="darkgrid")
-    plt.figure(figsize=(7, 6))
+    plt.figure(figsize=size)
     sns.heatmap(confusion_matrix, vmin=0.0, vmax=1.0)
     plt.title("Normalized Confusion Matrix")
     plt.xlabel("Predicted Labels")
@@ -570,3 +602,28 @@ def plot_confusion_matrix(confusion_matrix, labels: list[str]|None = None) -> No
         plt.xticks(ticks=torch.arange(N) + 0.55, labels=labels, fontsize=8)
         plt.yticks(ticks=torch.arange(N) + 0.55, labels=labels, fontsize=8)
     plt.show()
+
+
+if __name__ == "__main__":
+    # An example of how to create and train a model
+    CONFIG = dict(
+        model="RNN",
+        dataset="ATE",
+        embedding="Word2Vec",
+        batch_size=128,
+        epochs=30,
+        lr=1e-2,
+        criterion="NLLLoss",
+        optimizer="Adam",
+        hyperparams=dict(
+            input_size=300,
+            hidden_size=128,
+            num_layers=2
+        ),
+        early_stopping_patience=1,
+        device="cpu",
+        verbose=True
+    )
+    run = pipeline(CONFIG)
+    # KEYS "model", "encoder", "train_loader", "test_loader", "val_loader", "accuracy",
+    # "precision", "recall", "f1", "cf", and "loss" will now be available in 'run'.
