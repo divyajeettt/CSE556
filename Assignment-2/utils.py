@@ -3,7 +3,10 @@ import json
 import wandb
 import torch
 import gensim
+import pickle
+import seaborn as sns
 from typing import Any
+import matplotlib.pyplot as plt
 import sklearn.metrics as metrics
 from sklearn.preprocessing import LabelEncoder
 
@@ -122,11 +125,90 @@ class RNN(torch.nn.Module):
 
 
 class LSTM(torch.nn.Module):
-    pass
+    """
+    A class for the LSTM model. The model can be used for both NER
+    and ATE datasets. The model design is simply:
+        - An embedding layer
+        - 'num_layers' number of LSTM layers
+        - A fully connected layer with 'output_size' number of units
+        - A LogSoftmax layer for the output log probabilities
+
+    The embedding matrix is the word-embedding matrix given by the chosen
+    embedding model and must have an additional row for the <UNK> token
+    (will be added to your hyperparameters automatically through the pipeline).
+    """
+
+    input_size: int
+    hidden_size: int
+    num_layers: int
+    output_size: int
+    embedding_matrix: torch.Tensor
+
+    def __init__(self, input_size, hidden_size, num_layers, output_size, embedding_matrix):
+        super(LSTM, self).__init__()
+        self.embedding = torch.nn.Embedding.from_pretrained(embedding_matrix)
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.lstm = torch.nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = torch.nn.Linear(hidden_size, output_size)
+        self.softmax = torch.nn.LogSoftmax(dim=2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        The forward pass of the model. Returns the log probabilities of the
+        output classes for each word for each sentence in the batch. The hidden
+        states are handled internally by torch.nn.LSTM.
+        """
+        x = self.embedding(x)
+        hidden = (
+            torch.zeros(self.num_layers, x.shape[0], self.hidden_size),
+            torch.zeros(self.num_layers, x.shape[0], self.hidden_size)
+        )
+        output, _ = self.lstm(x, hidden)
+        output = self.fc(output)
+        return self.softmax(output)
 
 
 class GRU(torch.nn.Module):
-    pass
+    """
+    A class for the GRU model. The model can be used for both NER
+    and ATE datasets. The model design is simply:
+        - An embedding layer
+        - 'num_layers' number of GRU layers
+        - A fully connected layer with 'output_size' number of units
+        - A LogSoftmax layer for the output log probabilities
+
+    The embedding matrix is the word-embedding matrix given by the chosen
+    embedding model and must have an additional row for the <UNK> token
+    (will be added to your hyperparameters automatically through the pipeline).
+    """
+
+    input_size: int
+    hidden_size: int
+    num_layers: int
+    output_size: int
+    embedding_matrix: torch.Tensor
+
+    def __init__(self, input_size, hidden_size, num_layers, output_size, embedding_matrix):
+        super(GRUModel, self).__init__()
+        self.embedding = torch.nn.Embedding.from_pretrained(embedding_matrix)
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.gru = torch.nn.GRU(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = torch.nn.Linear(hidden_size, output_size)
+        self.softmax = torch.nn.LogSoftmax(dim=2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        The forward pass of the model. Returns the log probabilities of the
+        output classes for each word for each sentence in the batch. The hidden
+        states are handled internally by torch.nn.GRU.
+        """
+        x = self.embedding(x)
+        hidden = torch.zeros(self.num_layers, x.shape[0], self.hidden_size)
+        output, _ = self.gru(x, hidden)
+        output = self.fc(output)
+        return self.softmax(output)
 
 
 class BiLSTM_CRF(torch.nn.Module):
@@ -261,16 +343,16 @@ def train(
     best_val_loss = float("inf")
     patience, counter = 3, 0
 
-    for epochs in range(1, epochs+1):
+    for epoch in range(1, epochs+1):
         model.train()
-        train_loss, train_f1 = run_epoch(model, train_loader, optimizer, criterion, num_classes, evaluate=False)
+        train_details = run_epoch(model, train_loader, optimizer, criterion, num_classes, evaluate=False)
         with torch.no_grad():
             model.eval()
-            val_loss, val_f1 = run_epoch(model, val_loader, optimizer, criterion, num_classes, evaluate=True)
+            val_details = run_epoch(model, val_loader, optimizer, criterion, num_classes, evaluate=True)
         if verbose:
             epoch = f"[Epoch: {epoch}/{epochs}]"
-            train = f"Loss: {train_loss:.5f}, F1-Score: {train_f1:.5f}"
-            val = f"Loss: {val_loss:.5f}, F1-Score: {val_f1:.5f}"
+            train = f"Loss: {train_details['loss']:.5f}, F1-Score: {train_details['f1']:.5f}"
+            val = f"Loss: {val_details['loss']:.5f}, F1-Score: {val_details['f1']:.5f}"
             print(f"{epoch} Train: {train}, Validation: {val}", end="\r")
 
         if val_loss < best_val_loss:
@@ -281,10 +363,10 @@ def train(
                 break
 
         wandb.log({
-            "Train Loss": train_loss,
-            "Train F1-Score": train_f1,
-            "Validation Loss": val_loss,
-            "Validation F1-Score": val_f1
+            "Train Loss": train_details["loss"],
+            "Train F1-Score": train_details["f1"],
+            "Validation Loss": val_details["loss"],
+            "Validation F1-Score": val_details["f1"]
         }, step=epoch)
 
     if verbose:
@@ -292,28 +374,41 @@ def train(
 
 
 def evaluate(
-        model: torch.nn.Module, dataloader: torch.utils.data.DataLoader, criterion: torch.nn.Module,
-    ) -> tuple[float]:
+        model: torch.nn.Module, dataloader: torch.utils.data.DataLoader, criterion: torch.nn.Module
+    ) -> dict[str, float|torch.Tensor]:
     """
     Evaluates the given model using the given configurations. It is expected
     that this function is run through the pipeline after the configurations
-    have been checked. Returns the loss and f1-score for the given data (test) set.
+    have been checked. Returns the evaluation metrics for the given test set.
+    Also sets the confusion matrix as a heatmap on a plot.
     """
 
     model.eval()
     num_classes = len(dataloader.dataset.encoder.classes_)
     with torch.no_grad():
-        return run_epoch(model, dataloader, None, criterion, num_classes, evaluate=True)
+        details = run_epoch(model, dataloader, None, criterion, num_classes, evaluate=True)
+
+    print(f"Test Loss: {details['loss']:.5f}")
+    print(
+        f"Accuracy: {details['accuracy']:.5f}, Precision: {details['precision']:.5f}"
+        f", Recall: {details['recall']:.5f}, F1-Score: {details['f1']:.5f}"
+    )
+
+    sns.set_theme(style="darkgrid"))
+    plt.figure(figsize=(5, 4))
+    sns.heatmap(details["cf"], vmin=0.0, vmax=1.0)
+
+    return details
 
 
 def run_epoch(
         model: torch.nn.Module, dataloader: torch.utils.data.DataLoader, optimizer: torch.optim.Optimizer,
         criterion: torch.nn.Module, num_classes: int, evaluate: bool
-    ) -> tuple[float]:
+    ) -> dict[str, float|torch.Tensor]:
     """
     Runs a single epoch of training or validation. The model is trained
     if evaluate is False, and evaluated if evaluate is True. Returns the
-    loss and f1-score for the epoch.
+    evaluation metrics for the given epoch.
     """
 
     epoch_loss, true, predicted = 0, [], []
@@ -330,8 +425,19 @@ def run_epoch(
             optimizer.step()
             optimizer.zero_grad()
 
+    accuracy = metrics.accuracy_score(true, predicted)
+    precision = metrics.precision_score(true, predicted, average="macro")
+    recall = metrics.recall_score(true, predicted, average="macro")
     f1 = metrics.f1_score(true, predicted, average="macro")
-    return epoch_loss/len(dataloader), f1
+
+    cf_matrix = metrics.confusion_matrix(true, predicted)
+    cf_matrix = cf_matrix / cf_matrix.sum(axis=1, keepdims=True)
+    cf_matrix = torch.round(torch.tensor(cf_matrix, dtype=torch.float32), decimals=5)
+
+    return {
+        "loss": epoch_loss / len(dataloader), "accuracy": accuracy,
+        "precision": precision, "recall": recall, "f1": f1, "cf": cf_matrix
+    }
 
 
 def pipeline(configs: dict[str, Any]) -> None:
@@ -352,7 +458,7 @@ def pipeline(configs: dict[str, Any]) -> None:
         - batch_size: The batch size for the dataloaders.
         - epochs: The number of epochs to train the model.
         - lr: The learning rate for the optimizer.
-        - criterion: The loss function to use. Must be 'NLLLoss', 'CrossEntropy', or 'CRF'.
+        - criterion: The loss function to use. Must be 'NLLLoss', 'CrossEntropyLoss', or 'CRF'.
         - optimizer: The optimizer to use. Must be 'Adam', 'Adagrad', or 'SGD'.
         - hyperparams: A dictionary containing the hyperparameters for the model. This
             must match the hyperparams expected by the model.
@@ -376,7 +482,7 @@ def pipeline(configs: dict[str, Any]) -> None:
     val_loader = torch.utils.data.DataLoader(val_set, batch_size=batch_size, shuffle=False)
 
     criterion = configs["criterion"]
-    criterion = {"nllloss": nn.NLLLoss, "crossentropy": nn.CrossEntropyLoss, "crf": None}[criterion]()
+    criterion = {"nllloss": nn.NLLLoss, "crossentropyloss": nn.CrossEntropyLoss, "crf": None}[criterion]()
 
     optimizer = configs["optimizer"]
     optimizer = {"adam": torch.optim.Adam, "adagrad": torch.optim.Adagrad, "sgd": torch.optim.SGD}[optimizer]
@@ -387,7 +493,9 @@ def pipeline(configs: dict[str, Any]) -> None:
 
     with wandb.init(project=run, config=hyperparams):
         train(model, train_loader, val_loader, optimizer, criterion, configs["epochs"], configs["verbose"])
-        torch.save(model.state_dict(), model_path)
-        loss, f1 = evaluate(model, test_loader, criterion)
-        print(f"Test Loss: {loss:.5f}, Test F1-Score: {f1:.5f}")
+        test_details = evaluate(model, test_loader, criterion)
         model_path = fr"Assignment-2/Models/{run}.pt"
+        torch.save(model.state_dict(), model_path)
+        with open(fr"Assignment-2/Models/{run}.pkl", "wb") as file:
+            pickle.dump(test_details, file)
+        plt.show()
