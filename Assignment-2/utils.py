@@ -217,7 +217,7 @@ class CRF(torch.nn.Module):
         self.start = self.num_tags-2
         self.end = self.start+1
         self.transitions = torch.nn.Parameter(torch.randn(self.num_tags, self.num_tags))
-    
+
     def forward_score(self,features):
         scores = torch.ones(features.shape[0], self.num_tags) * -6969
         scores[:,self.start] = 0
@@ -227,7 +227,7 @@ class CRF(torch.nn.Module):
             scores = torch.logsumexp(score, dim=-1)
         scores = scores + self.transitions[self.end]
         return torch.logsumexp(scores, dim=-1)
-    
+
     def score_sentence(self,features,tags):
         scores = features.gather(2, tags.unsqueeze(2)).squeeze(2)
         start = torch.ones(features.shape[0],1,dtype=torch.long) * self.start
@@ -236,7 +236,7 @@ class CRF(torch.nn.Module):
         last_tags = torch.gather(tags,1,torch.ones(tags.shape,dtype=torch.long) * tags.shape[1]-1)
         last_scores = self.transitions[self.end,last_tags]
         return (trans_scores + scores).sum(dim=1) + last_scores
-    
+
     def viterbi_decode(self,features):
         scores = torch.ones(features.shape[0], self.num_tags) * -6969
         scores[:,self.start] = 0
@@ -254,7 +254,7 @@ class CRF(torch.nn.Module):
             best_path.append(idx)
         best_path = torch.cat(list(reversed(best_path)),dim=1)
         return scores, best_path
-    
+
     def forward(self,features):
         return self.viterbi_decode(features)
 
@@ -446,6 +446,7 @@ def train(
         model.train()
         train_loss, train_true, train_predicted = 0, [], []
         for data, labels in train_loader:
+            data, labels = data.to(device), labels.to(device)
             output = model(data).permute(0, 2, 1)
             mask = (data != 0)
             labels = labels * mask
@@ -461,6 +462,7 @@ def train(
         with torch.no_grad():
             val_loss, val_true, val_predicted = 0, [], []
             for data, labels in val_loader:
+                data, labels = data.to(device), labels.to(device)
                 output = model(data).permute(0, 2, 1)
                 mask = (data != 0)
                 labels = labels * mask
@@ -505,6 +507,7 @@ def evaluate(
     with torch.no_grad():
         test_loss, test_true, test_predicted = 0, [], []
         for data, labels in dataloader:
+            data, labels = data.to(device), labels.to(device)
             output = model(data).permute(0, 2, 1)
             mask = (data != 0)
             labels = labels * mask
