@@ -217,7 +217,7 @@ class CRF(torch.nn.Module):
         self.start = self.num_tags-2
         self.end = self.start+1
         self.transitions = torch.nn.Parameter(torch.randn(self.num_tags, self.num_tags))
-
+    
     def forward_score(self,features):
         scores = torch.ones(features.shape[0], self.num_tags) * -6969
         scores[:,self.start] = 0
@@ -227,34 +227,42 @@ class CRF(torch.nn.Module):
             scores = torch.logsumexp(score, dim=-1)
         scores = scores + self.transitions[self.end]
         return torch.logsumexp(scores, dim=-1)
-
+    
     def score_sentence(self,features,tags):
         scores = features.gather(2, tags.unsqueeze(2)).squeeze(2)
         start = torch.ones(features.shape[0],1,dtype=torch.long) * self.start
         tags = torch.cat([start,tags],dim=1)
-        trans_scores = self.transitions[tags[:,:-1],tags[:,1:]].sum(dim=1)
-        last_tags = torch.gather(tags,1,torch.ones(tags.shape,dtype=torch.long) * tags.shape[1]-1)
-        last_scores = self.transitions[self.end,last_tags]
+        trans_scores = self.transitions[tags[:,:-1],tags[:,1:]]
+        last_tag = tags.gather(1,torch.ones(features.shape[0],1,dtype=torch.long) * features.shape[1])
+        last_scores = self.transitions[self.end,last_tag]
         return (trans_scores + scores).sum(dim=1) + last_scores
-
+    
     def viterbi_decode(self,features):
         scores = torch.ones(features.shape[0], self.num_tags) * -6969
+        ptrs = torch.zeros_like(features)
         scores[:,self.start] = 0
-        paths = []
         for i in range(features.shape[1]):
             feat = features[:,i]
-            score = scores.unsqueeze(1) + feat.unsqueeze(2) + self.transitions.unsqueeze(0)
-            scores, idx = score.max(dim=-1)
-            paths.append(idx)
-        scores = scores + self.transitions[self.end]
-        scores, idx = scores.max(dim=-1)
-        best_path = [idx]
-        for path in reversed(paths):
-            idx = path.gather(1,idx)
-            best_path.append(idx)
-        best_path = torch.cat(list(reversed(best_path)),dim=1)
-        return scores, best_path
+            score = scores.unsqueeze(1) + self.transitions
 
+            score, ptrs[:,i,:] = score.max(dim=-1)
+            score += feat
+            scores = score
+
+        scores += self.transitions[self.end]
+        scores, idx = scores.max(dim=-1)
+        best_paths = []
+        ptrs = ptrs.cpu().numpy()
+        for i in range(features.shape[0]):
+            bt = idx[i].item()
+            best_path = [bt]
+            for ptr in reversed(ptrs[i]):
+                bt = int(ptr[bt])
+                best_path.append(bt)
+            best_path.pop()
+            best_paths.append(best_path[::-1])
+        return scores, best_paths
+    
     def forward(self,features):
         return self.viterbi_decode(features)
 
@@ -446,14 +454,13 @@ def train(
         model.train()
         train_loss, train_true, train_predicted = 0, [], []
         for data, labels in train_loader:
-            data, labels = data.to(device), labels.to(device)
             output = model(data).permute(0, 2, 1)
             mask = (data != 0)
             labels = labels * mask
             output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
             train_loss += (loss := criterion(output, labels)).item()
-            train_true.extend(labels[mask].tolist())
-            train_predicted.extend(output.argmax(dim=1)[mask].tolist())
+            train_true.extend(labels.flatten().tolist())
+            train_predicted.extend(output.argmax(dim=1).flatten().tolist())
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
@@ -462,14 +469,13 @@ def train(
         with torch.no_grad():
             val_loss, val_true, val_predicted = 0, [], []
             for data, labels in val_loader:
-                data, labels = data.to(device), labels.to(device)
                 output = model(data).permute(0, 2, 1)
                 mask = (data != 0)
                 labels = labels * mask
                 output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
                 val_loss += (loss := criterion(output, labels)).item()
-                val_true.extend(labels[mask].tolist())
-                val_predicted.extend(output.argmax(dim=1)[mask].tolist())
+                val_true.extend(labels.flatten().tolist())
+                val_predicted.extend(output.argmax(dim=1).flatten().tolist())
 
         model.LOSSES[epoch, 0] = train_loss / len(train_loader)
         model.LOSSES[epoch, 1] = val_loss / len(val_loader)
@@ -507,14 +513,13 @@ def evaluate(
     with torch.no_grad():
         test_loss, test_true, test_predicted = 0, [], []
         for data, labels in dataloader:
-            data, labels = data.to(device), labels.to(device)
             output = model(data).permute(0, 2, 1)
             mask = (data != 0)
             labels = labels * mask
             output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
             test_loss += (loss := criterion(output, labels)).item()
-            test_true.extend(labels[mask].tolist())
-            test_predicted.extend(output.argmax(dim=1)[mask].tolist())
+            test_true.extend(labels.flatten().tolist())
+            test_predicted.extend(output.argmax(dim=1).flatten().tolist())
 
     test_details = {
         "loss": test_loss / len(dataloader),
