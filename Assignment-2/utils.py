@@ -452,8 +452,8 @@ def train(
             labels = labels * mask
             output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
             train_loss += (loss := criterion(output, labels)).item()
-            train_true.extend(labels.flatten().tolist())
-            train_predicted.extend(output.argmax(dim=1).flatten().tolist())
+            train_true.extend(labels[mask].tolist())
+            train_predicted.extend(output.argmax(dim=1)[mask].tolist())
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
@@ -468,8 +468,8 @@ def train(
                 labels = labels * mask
                 output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
                 val_loss += (loss := criterion(output, labels)).item()
-                val_true.extend(labels.flatten().tolist())
-                val_predicted.extend(output.argmax(dim=1).flatten().tolist())
+                val_true.extend(labels[mask].tolist())
+                val_predicted.extend(output.argmax(dim=1)[mask].tolist())
 
         model.LOSSES[epoch, 0] = train_loss / len(train_loader)
         model.LOSSES[epoch, 1] = val_loss / len(val_loader)
@@ -513,8 +513,8 @@ def evaluate(
             labels = labels * mask
             output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
             test_loss += (loss := criterion(output, labels)).item()
-            test_true.extend(labels.flatten().tolist())
-            test_predicted.extend(output.argmax(dim=1).flatten().tolist())
+            test_true.extend(labels[mask].tolist())
+            test_predicted.extend(output.argmax(dim=1)[mask].tolist())
 
     test_details = {
         "loss": test_loss / len(dataloader),
