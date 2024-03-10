@@ -211,11 +211,12 @@ class GRU(torch.nn.Module):
         return self.softmax(output)
 
 class CRF(torch.nn.Module):
-    def __init__(self, num_tags):
+    def __init__(self, lstm_dim,num_tags):
         super(CRF, self).__init__()
         self.num_tags = num_tags + 2
         self.start = self.num_tags-2
         self.end = self.start+1
+        self.projector = torch.nn.Linear(lstm_dim, self.num_tags)
         self.transitions = torch.nn.Parameter(torch.randn(self.num_tags, self.num_tags))
     
     def forward_score(self,features):
@@ -264,9 +265,11 @@ class CRF(torch.nn.Module):
         return scores, best_paths
     
     def forward(self,features):
+        features = self.projector(features)
         return self.viterbi_decode(features)
 
     def loss(self,features,tags):
+        features = self.projector(features)
         forward_score = self.forward_score(features)
         gold_score = self.score_sentence(features,tags.long())
         return (forward_score - gold_score).mean()
