@@ -212,7 +212,6 @@ class GRU(torch.nn.Module):
         output = self.fc(output)
         return self.softmax(output)
 
-
 class BiLSTM_CRF(torch.nn.Module):
     """
     A class for the GRU model. The model can be used for both NER and ATE
@@ -224,25 +223,80 @@ class BiLSTM_CRF(torch.nn.Module):
     embedding model and must have an additional row for the <UNK> token
     (will be added to your hyperparameters automatically through the pipeline).
     """
-    def __init__(self, input_size:int, hidden_size:int, num_layers:int, output_size:int, embedding_matrix:torch.Tensor):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, embedding_matrix):
         super(BiLSTM_CRF, self).__init__()
         self.embedding = torch.nn.Embedding.from_pretrained(embedding_matrix)
+        self.num_tags = output_size + 2
+        self.start = self.num_tags-2
+        self.end = self.start+1
+        
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.bilstm = torch.nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
-        self.fc = torch.nn.Linear(hidden_size * 2, output_size)
-        self.CRF = CRF(num_tags=output_size)
+        self.projector = torch.nn.Linear(hidden_size * 2, self.num_tags)
+        self.transitions = torch.nn.Parameter(torch.randn(self.num_tags, self.num_tags))
+    
+    def forward_score(self,features):
+        scores = torch.ones(features.shape[0], self.num_tags) * -6969
+        scores[:,self.start] = 0
+        for i in range(features.shape[1]):
+            feat = features[:,i]
+            score = scores.unsqueeze(1) + feat.unsqueeze(2) + self.transitions.unsqueeze(0)
+            scores = torch.logsumexp(score, dim=-1)
+        scores = scores + self.transitions[self.end]
+        return torch.logsumexp(scores, dim=-1)
+    
+    def score_sentence(self,features,tags):
+        scores = features.gather(2, tags.unsqueeze(2)).squeeze(2)
+        start = torch.ones(features.shape[0],1,dtype=torch.long) * self.start
+        tags = torch.cat([start,tags],dim=1)
+        trans_scores = self.transitions[tags[:,:-1],tags[:,1:]]
+        last_tag = tags.gather(1,torch.ones(features.shape[0],1,dtype=torch.long) * features.shape[1])
+        last_scores = self.transitions[self.end,last_tag]
+        return (trans_scores + scores).sum(dim=1) + last_scores
+    
+    def viterbi_decode(self,features):
+        scores = torch.ones(features.shape[0], self.num_tags) * -6969
+        ptrs = torch.zeros_like(features)
+        scores[:,self.start] = 0
+        for i in range(features.shape[1]):
+            feat = features[:,i]
+            score = scores.unsqueeze(1) + self.transitions
 
-    def forward(self, x:torch.Tensor) -> torch.Tensor:
+            score, ptrs[:,i,:] = score.max(dim=-1)
+            score += feat
+            scores = score
+
+        scores += self.transitions[self.end]
+        scores, idx = scores.max(dim=-1)
+        best_paths = []
+        ptrs = ptrs.cpu().numpy()
+        for i in range(features.shape[0]):
+            bt = idx[i].item()
+            best_path = [bt]
+            for ptr in reversed(ptrs[i]):
+                bt = int(ptr[bt])
+                best_path.append(bt)
+            best_path.pop()
+            best_paths.append(best_path[::-1])
+        return scores, best_paths
+    
+    def forward(self,x):
         x = self.embedding(x)
         hidden = (
             torch.zeros(self.num_layers * 2, x.shape[0], self.hidden_size),
             torch.zeros(self.num_layers * 2, x.shape[0], self.hidden_size)
         )
-
         output, _ = self.bilstm(x, hidden)
-        output = self.fc(output)
-        return output
+        features = self.projector(output)
+        scores, best_paths = self.viterbi_decode(features)
+        return features, scores, best_paths
+
+    def loss(self,x,tags):
+        features, _, _ = self.forward(x)
+        forward_score = self.forward_score(features)
+        gold_score = self.score_sentence(features,tags.long())
+        return (forward_score - gold_score).mean()
 
 
 def load_dataset(dataset: str, embedding: str, verbose: bool) -> tuple[CustomDataset]:
@@ -349,7 +403,7 @@ def check_config(config: dict[str, Any]) -> None:
 
     criterion_err = "Invalid criterion. Must be 'NLLLoss', 'CrossEntropy', or 'CRF'."
     config["criterion"] = config.get("criterion", "").casefold()
-    assert config["criterion"] in ["nllloss", "crossentropy", "crf"], criterion_err
+    assert config["criterion"] in ["nllloss", "crossentropyloss", "crf"], criterion_err
 
     optimizer_err = "Invalid optimizer. Must be 'Adam', 'Adagrad', or 'SGD'."
     config["optimizer"] = config.get("optimizer", "").casefold()
@@ -399,15 +453,14 @@ def train(
             # print("DATA:", data.shape)
             # print("LABELS:", labels.shape)
             if CRF:
-                output = model(data)
-                # print("OUTPUTS:", output.shape)
-                loss = -model.CRF(output, labels)
+                lstm_out, scores, best_path = model(data)
+                loss = model.loss(data, labels)
                 train_loss += loss
                 loss.backward()
                 optimizer.step()
                 optimizer.zero_grad()
                 train_true.extend(labels.view(-1).tolist())
-                pred = torch.Tensor(model.CRF.decode(output))
+                pred = torch.Tensor(best_path)
                 train_predicted.extend(pred.view(-1).tolist())
             else:
                 output = model(data).permute(0, 2, 1)
@@ -427,11 +480,11 @@ def train(
             for data, labels in val_loader:
                 data, labels = data.to(device), labels.to(device)
                 if CRF:
-                    output = model(data)
-                    loss = -model.CRF(output, labels)
+                    lstm_out, scores, best_path = model(data)
+                    loss = model.loss(data, labels)
                     val_loss += loss
                     val_true.extend(labels.view(-1).tolist())
-                    pred = torch.Tensor(model.CRF.decode(output))
+                    pred = torch.Tensor(best_path)
                     val_predicted.extend(pred.view(-1).tolist())
                 else:
                     output = model(data).permute(0, 2, 1)
@@ -479,11 +532,11 @@ def evaluate(
         test_loss, test_true, test_predicted = 0, [], []
         for data, labels in dataloader:
             if CRF:
-                output = model(data)
-                loss = -model.CRF(output, labels)
+                lstm_out, scores, best_path = model(data)
+                loss = model.loss(data, labels)
                 test_loss += loss
                 test_true.extend(labels.view(-1).tolist())
-                pred = torch.Tensor(model.CRF.decode(output))
+                pred = torch.Tensor(best_path)
                 test_predicted.extend(pred.view(-1).tolist())
             else:
                 data, labels = data.to(device), labels.to(device)
@@ -504,8 +557,8 @@ def evaluate(
         "cf": metrics.confusion_matrix(test_true, test_predicted, normalize="true")
     }
 
-    print("TEST TRUE:", test_true)
-    print("TEST PRED:", test_predicted)
+    print("TEST TRUE != 2:", test_true[test_true != 2])
+    print("TEST PRED != 2:", test_predicted[test_true != 2])
 
     print(f"Test Loss: {test_details['loss']:.5f}")
     print(
@@ -569,6 +622,10 @@ def pipeline(config: dict[str, str|float|dict[str, int]]) -> dict[str, Any]:
     criterion = config["criterion"]
     criterion = {"nllloss": torch.nn.NLLLoss, "crossentropyloss": torch.nn.CrossEntropyLoss, "crf": None}[criterion]()
 
+    if(config['CRF']):
+        criterion = model.loss
+    print(criterion)
+
     optimizer = config["optimizer"]
     optimizer = {"adam": torch.optim.Adam, "adagrad": torch.optim.Adagrad, "sgd": torch.optim.SGD}[optimizer]
     optimizer = optimizer(model.parameters(), lr=config["lr"])
@@ -603,16 +660,16 @@ def plot_learning_curve(model: torch.nn.Module) -> None:
     sns.set_theme(style="darkgrid")
 
     fig, ax = plt.subplots(1, 2, figsize=(15, 5))
-    ax[0].plot(model.LOSSES[:, 0], label="Train Loss")
-    ax[0].plot(model.LOSSES[:, 1], label="Validation Loss")
+    ax[0].plot(model.LOSSES[:, 0].detach().numpy(), label="Train Loss")
+    ax[0].plot(model.LOSSES[:, 1].detach().numpy(), label="Validation Loss")
     ax[0].set_title("Loss Curve")
     ax[0].set_xlabel("Epochs")
     ax[0].set_ylabel("Loss")
     ax[0].grid(True)
     ax[0].legend()
 
-    ax[1].plot(model.F1_SCORES[:, 0], label="Train F1-Score")
-    ax[1].plot(model.F1_SCORES[:, 1], label="Validation F1-Score")
+    ax[1].plot(model.F1_SCORES[:, 0].detach().numpy(), label="Train F1-Score")
+    ax[1].plot(model.F1_SCORES[:, 1].detach().numpy(), label="Validation F1-Score")
     ax[1].set_title("F1-Score Curve")
     ax[1].set_xlabel("Epochs")
     ax[1].set_ylabel("Macro F1-Score")
