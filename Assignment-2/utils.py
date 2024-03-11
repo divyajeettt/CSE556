@@ -7,6 +7,8 @@ import pickle
 import seaborn as sns
 from typing import Any
 import matplotlib.pyplot as plt
+from torchcrf import CRF
+import sys
 import sklearn.metrics as metrics
 from sklearn.preprocessing import LabelEncoder
 
@@ -210,58 +212,6 @@ class GRU(torch.nn.Module):
         output = self.fc(output)
         return self.softmax(output)
 
-class CRF(torch.nn.Module):
-    def __init__(self, num_tags):
-        super(CRF, self).__init__()
-        self.num_tags = num_tags + 2
-        self.start = self.num_tags-2
-        self.end = self.start+1
-        self.transitions = torch.nn.Parameter(torch.randn(self.num_tags, self.num_tags))
-
-    def forward_score(self,features):
-        scores = torch.ones(features.shape[0], self.num_tags) * -6969
-        scores[:,self.start] = 0
-        for i in range(features.shape[1]):
-            feat = features[:,i]
-            score = scores.unsqueeze(1) + feat.unsqueeze(2) + self.transitions.unsqueeze(0)
-            scores = torch.logsumexp(score, dim=-1)
-        scores = scores + self.transitions[self.end]
-        return torch.logsumexp(scores, dim=-1)
-
-    def score_sentence(self,features,tags):
-        scores = features.gather(2, tags.unsqueeze(2)).squeeze(2)
-        start = torch.ones(features.shape[0],1,dtype=torch.long) * self.start
-        tags = torch.cat([start,tags],dim=1)
-        trans_scores = self.transitions[tags[:,:-1],tags[:,1:]].sum(dim=1)
-        last_tags = torch.gather(tags,1,torch.ones(tags.shape,dtype=torch.long) * tags.shape[1]-1)
-        last_scores = self.transitions[self.end,last_tags]
-        return (trans_scores + scores).sum(dim=1) + last_scores
-
-    def viterbi_decode(self,features):
-        scores = torch.ones(features.shape[0], self.num_tags) * -6969
-        scores[:,self.start] = 0
-        paths = []
-        for i in range(features.shape[1]):
-            feat = features[:,i]
-            score = scores.unsqueeze(1) + feat.unsqueeze(2) + self.transitions.unsqueeze(0)
-            scores, idx = score.max(dim=-1)
-            paths.append(idx)
-        scores = scores + self.transitions[self.end]
-        scores, idx = scores.max(dim=-1)
-        best_path = [idx]
-        for path in reversed(paths):
-            idx = path.gather(1,idx)
-            best_path.append(idx)
-        best_path = torch.cat(list(reversed(best_path)),dim=1)
-        return scores, best_path
-
-    def forward(self,features):
-        return self.viterbi_decode(features)
-
-    def loss(self,features,tags):
-        forward_score = self.forward_score(features)
-        gold_score = self.score_sentence(features,tags.long())
-        return (forward_score - gold_score).mean()
 
 class BiLSTM_CRF(torch.nn.Module):
     """
@@ -274,27 +224,25 @@ class BiLSTM_CRF(torch.nn.Module):
     embedding model and must have an additional row for the <UNK> token
     (will be added to your hyperparameters automatically through the pipeline).
     """
-
-    # parameter: type
-    embedding_matrix: torch.Tensor
-
-    # [ideally, match the signature of the other models - RNN, LSTM, GRU]
-    # must at least have the embedding matrix as a parameter (due to data preprocessing)
-    def __init__(self, embedding_matrix, /, *args):
+    def __init__(self, input_size:int, hidden_size:int, num_layers:int, output_size:int, embedding_matrix:torch.Tensor):
         super(BiLSTM_CRF, self).__init__()
         self.embedding = torch.nn.Embedding.from_pretrained(embedding_matrix)
-        # TO-BE-IMPLEMENTED
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.bilstm = torch.nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
+        self.fc = torch.nn.Linear(hidden_size * 2, output_size)
+        self.CRF = CRF(num_tags=output_size)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        The forward pass of the model. Must return the log probabilities of the
-        output classes for each word for each sentence in the batch (assuming
-        BiLSTM-CRF works in the same way).
-        x.shape = (batch_size, max_sentence_length)
-        out.shape = (batch_size, max_sentence_length, num_classes)
-        """
-        # TO-BE-IMPLEMENTED
-        pass
+    def forward(self, x:torch.Tensor) -> torch.Tensor:
+        x = self.embedding(x)
+        hidden = (
+            torch.zeros(self.num_layers * 2, x.shape[0], self.hidden_size),
+            torch.zeros(self.num_layers * 2, x.shape[0], self.hidden_size)
+        )
+
+        output, _ = self.bilstm(x, hidden)
+        output = self.fc(output)
+        return output
 
 
 def load_dataset(dataset: str, embedding: str, verbose: bool) -> tuple[CustomDataset]:
@@ -425,7 +373,7 @@ def check_config(config: dict[str, Any]) -> None:
 
 def train(
         model: torch.nn.Module, train_loader: torch.utils.data.DataLoader, val_loader: torch.utils.data.DataLoader,
-        optimizer: torch.optim.Optimizer, criterion: torch.nn.Module, epochs: int, patience: int, verbose: bool
+        optimizer: torch.optim.Optimizer, criterion: torch.nn.Module, epochs: int, patience: int, verbose: bool, CRF:bool
     ) -> None:
     """
     Trains the given model using the given configurations. It is expected
@@ -442,34 +390,57 @@ def train(
     model.F1_SCORES = torch.zeros(epochs, 2)
 
     progress_bar = tqdm.tqdm(range(epochs), bar_format=r"{l_bar}{bar:15}{r_bar}")
+
     for epoch in progress_bar if verbose else range(epochs):
         model.train()
         train_loss, train_true, train_predicted = 0, [], []
         for data, labels in train_loader:
             data, labels = data.to(device), labels.to(device)
-            output = model(data).permute(0, 2, 1)
-            mask = (data != 0)
-            labels = labels * mask
-            output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
-            train_loss += (loss := criterion(output, labels)).item()
-            train_true.extend(labels[mask].tolist())
-            train_predicted.extend(output.argmax(dim=1)[mask].tolist())
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
+            # print("DATA:", data.shape)
+            # print("LABELS:", labels.shape)
+            if CRF:
+                output = model(data)
+                # print("OUTPUTS:", output.shape)
+                loss = -model.CRF(output, labels)
+                train_loss += loss
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+                train_true.extend(labels.view(-1).tolist())
+                pred = torch.Tensor(model.CRF.decode(output))
+                train_predicted.extend(pred.view(-1).tolist())
+            else:
+                output = model(data).permute(0, 2, 1)
+                mask = (data != 0)
+                labels = labels * mask
+                output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
+                train_loss += (loss := criterion(output, labels)).item()
+                train_true.extend(labels[mask].tolist())
+                train_predicted.extend(output.argmax(dim=1)[mask].tolist())
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
 
         model.eval()
         with torch.no_grad():
             val_loss, val_true, val_predicted = 0, [], []
             for data, labels in val_loader:
                 data, labels = data.to(device), labels.to(device)
-                output = model(data).permute(0, 2, 1)
-                mask = (data != 0)
-                labels = labels * mask
-                output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
-                val_loss += (loss := criterion(output, labels)).item()
-                val_true.extend(labels[mask].tolist())
-                val_predicted.extend(output.argmax(dim=1)[mask].tolist())
+                if CRF:
+                    output = model(data)
+                    loss = -model.CRF(output, labels)
+                    val_loss += loss
+                    val_true.extend(labels.view(-1).tolist())
+                    pred = torch.Tensor(model.CRF.decode(output))
+                    val_predicted.extend(pred.view(-1).tolist())
+                else:
+                    output = model(data).permute(0, 2, 1)
+                    mask = (data != 0)
+                    labels = labels * mask
+                    output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
+                    val_loss += (loss := criterion(output, labels)).item()
+                    val_true.extend(labels[mask].tolist())
+                    val_predicted.extend(output.argmax(dim=1)[mask].tolist())
 
         model.LOSSES[epoch, 0] = train_loss / len(train_loader)
         model.LOSSES[epoch, 1] = val_loss / len(val_loader)
@@ -492,7 +463,7 @@ def train(
 
 
 def evaluate(
-        model: torch.nn.Module, dataloader: torch.utils.data.DataLoader, criterion: torch.nn.Module
+        model: torch.nn.Module, dataloader: torch.utils.data.DataLoader, criterion: torch.nn.Module, CRF: bool
     ) -> dict[str, float|torch.Tensor]:
     """
     Evaluates the given model using the given configurations. It is expected
@@ -507,14 +478,22 @@ def evaluate(
     with torch.no_grad():
         test_loss, test_true, test_predicted = 0, [], []
         for data, labels in dataloader:
-            data, labels = data.to(device), labels.to(device)
-            output = model(data).permute(0, 2, 1)
-            mask = (data != 0)
-            labels = labels * mask
-            output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
-            test_loss += (loss := criterion(output, labels)).item()
-            test_true.extend(labels[mask].tolist())
-            test_predicted.extend(output.argmax(dim=1)[mask].tolist())
+            if CRF:
+                output = model(data)
+                loss = -model.CRF(output, labels)
+                test_loss += loss
+                test_true.extend(labels.view(-1).tolist())
+                pred = torch.Tensor(model.CRF.decode(output))
+                test_predicted.extend(pred.view(-1).tolist())
+            else:
+                data, labels = data.to(device), labels.to(device)
+                output = model(data).permute(0, 2, 1)
+                mask = (data != 0)
+                labels = labels * mask
+                output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
+                test_loss += (loss := criterion(output, labels)).item()
+                test_true.extend(labels[mask].tolist())
+                test_predicted.extend(output.argmax(dim=1)[mask].tolist())
 
     test_details = {
         "loss": test_loss / len(dataloader),
@@ -524,6 +503,9 @@ def evaluate(
         "f1": metrics.f1_score(test_true, test_predicted, average="macro"),
         "cf": metrics.confusion_matrix(test_true, test_predicted, normalize="true")
     }
+
+    print("TEST TRUE:", test_true)
+    print("TEST PRED:", test_predicted)
 
     print(f"Test Loss: {test_details['loss']:.5f}")
     print(
@@ -567,6 +549,7 @@ def pipeline(config: dict[str, str|float|dict[str, int]]) -> dict[str, Any]:
     and a dictionary of evaluation metrics for the test set.
     """
 
+    print("CRF:", config["CRF"])
     check_config(config)
 
     train_set, test_set, val_set = load_dataset(config["dataset"], config["embedding"], config["verbose"])
@@ -596,9 +579,9 @@ def pipeline(config: dict[str, str|float|dict[str, int]]) -> dict[str, Any]:
     model.to(config["device"])
     train(
         model, train_loader, val_loader, optimizer, criterion,
-        config["epochs"], config["early_stopping_patience"], config["verbose"]
+        config["epochs"], config["early_stopping_patience"], config["verbose"], config["CRF"]
     )
-    test_details = evaluate(model, test_loader, criterion)
+    test_details = evaluate(model, test_loader, criterion, config["CRF"])
     model_path = fr"Models/{run}.pt"
     torch.save(model.state_dict(), model_path)
     with open(fr"Models/{run}.pkl", "wb") as file:
@@ -677,7 +660,8 @@ if __name__ == "__main__":
         ),
         early_stopping_patience=1,
         device="cpu",
-        verbose=True
+        verbose=True,
+        CRF=True
     )
     run = pipeline(CONFIG)
     # KEYS "model", "encoder", "train_loader", "test_loader", "val_loader", "accuracy",
