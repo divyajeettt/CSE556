@@ -7,10 +7,25 @@ import pickle
 import seaborn as sns
 from typing import Any
 import matplotlib.pyplot as plt
-from torchcrf import CRF
 import sys
 import sklearn.metrics as metrics
 from sklearn.preprocessing import LabelEncoder
+import numpy as np
+from sklearn.metrics import f1_score
+
+
+def labelwise_f1(y_true, y_pred,label_encoder):
+    y_pred = label_encoder.inverse_transform(y_pred)
+    y_true = label_encoder.inverse_transform(y_true)
+    y_pred = [c.split('_')[1] if '_' in c else c for c in y_pred]
+    y_true = [c.split('_')[1] if '_' in c else c for c in y_true]
+    le = LabelEncoder()
+    le.fit(y_true+y_pred)
+    y_true = le.transform(y_true)
+    y_pred = le.transform(y_pred)
+    scores = f1_score(y_true, y_pred, average=None)
+    return dict(zip(le.classes_, scores))
+
 
 
 WordEmbedding = gensim.models.keyedvectors.KeyedVectors | gensim.models.fasttext.FastTextKeyedVectors
@@ -554,11 +569,9 @@ def evaluate(
         "precision": metrics.precision_score(test_true, test_predicted, average="macro"),
         "recall": metrics.recall_score(test_true, test_predicted, average="macro"),
         "f1": metrics.f1_score(test_true, test_predicted, average="macro"),
-        "cf": metrics.confusion_matrix(test_true, test_predicted, normalize="true")
+        "cf": metrics.confusion_matrix(test_true, test_predicted, normalize="true"),
+        "class_wise_f1:": labelwise_f1(test_true, test_predicted, dataloader.dataset.encoder)
     }
-
-    print("TEST TRUE != 2:", test_true[test_true != 2])
-    print("TEST PRED != 2:", test_predicted[test_true != 2])
 
     print(f"Test Loss: {test_details['loss']:.5f}")
     print(
