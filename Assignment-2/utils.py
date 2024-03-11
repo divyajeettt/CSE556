@@ -7,8 +7,25 @@ import pickle
 import seaborn as sns
 from typing import Any
 import matplotlib.pyplot as plt
+import sys
 import sklearn.metrics as metrics
 from sklearn.preprocessing import LabelEncoder
+import numpy as np
+from sklearn.metrics import f1_score
+
+
+def labelwise_f1(y_true, y_pred,label_encoder):
+    y_pred = label_encoder.inverse_transform(y_pred)
+    y_true = label_encoder.inverse_transform(y_true)
+    y_pred = [c.split('_')[1] if '_' in c else c for c in y_pred]
+    y_true = [c.split('_')[1] if '_' in c else c for c in y_true]
+    le = LabelEncoder()
+    le.fit(y_true+y_pred)
+    y_true = le.transform(y_true)
+    y_pred = le.transform(y_pred)
+    scores = f1_score(y_true, y_pred, average=None)
+    return dict(zip(le.classes_, scores))
+
 
 
 WordEmbedding = gensim.models.keyedvectors.KeyedVectors | gensim.models.fasttext.FastTextKeyedVectors
@@ -210,13 +227,28 @@ class GRU(torch.nn.Module):
         output = self.fc(output)
         return self.softmax(output)
 
-class CRF(torch.nn.Module):
-    def __init__(self, lstm_dim,num_tags):
-        super(CRF, self).__init__()
-        self.num_tags = num_tags + 2
+class BiLSTM_CRF(torch.nn.Module):
+    """
+    A class for the GRU model. The model can be used for both NER and ATE
+    datasets. The model design is simply:
+        - An embedding layer
+        - TO-BE-IMPLEMENTED
+
+    The embedding matrix is the word-embedding matrix given by the chosen
+    embedding model and must have an additional row for the <UNK> token
+    (will be added to your hyperparameters automatically through the pipeline).
+    """
+    def __init__(self, input_size, hidden_size, num_layers, output_size, embedding_matrix):
+        super(BiLSTM_CRF, self).__init__()
+        self.embedding = torch.nn.Embedding.from_pretrained(embedding_matrix)
+        self.num_tags = output_size + 2
         self.start = self.num_tags-2
         self.end = self.start+1
-        self.projector = torch.nn.Linear(lstm_dim, self.num_tags)
+        
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.bilstm = torch.nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
+        self.projector = torch.nn.Linear(hidden_size * 2, self.num_tags)
         self.transitions = torch.nn.Parameter(torch.randn(self.num_tags, self.num_tags))
     
     def forward_score(self,features):
@@ -264,48 +296,22 @@ class CRF(torch.nn.Module):
             best_paths.append(best_path[::-1])
         return scores, best_paths
     
-    def forward(self,features):
-        features = self.projector(features)
-        return self.viterbi_decode(features)
+    def forward(self,x):
+        x = self.embedding(x)
+        hidden = (
+            torch.zeros(self.num_layers * 2, x.shape[0], self.hidden_size),
+            torch.zeros(self.num_layers * 2, x.shape[0], self.hidden_size)
+        )
+        output, _ = self.bilstm(x, hidden)
+        features = self.projector(output)
+        scores, best_paths = self.viterbi_decode(features)
+        return features, scores, best_paths
 
-    def loss(self,features,tags):
-        features = self.projector(features)
+    def loss(self,x,tags):
+        features, _, _ = self.forward(x)
         forward_score = self.forward_score(features)
         gold_score = self.score_sentence(features,tags.long())
         return (forward_score - gold_score).mean()
-
-class BiLSTM_CRF(torch.nn.Module):
-    """
-    A class for the GRU model. The model can be used for both NER and ATE
-    datasets. The model design is simply:
-        - An embedding layer
-        - TO-BE-IMPLEMENTED
-
-    The embedding matrix is the word-embedding matrix given by the chosen
-    embedding model and must have an additional row for the <UNK> token
-    (will be added to your hyperparameters automatically through the pipeline).
-    """
-
-    # parameter: type
-    embedding_matrix: torch.Tensor
-
-    # [ideally, match the signature of the other models - RNN, LSTM, GRU]
-    # must at least have the embedding matrix as a parameter (due to data preprocessing)
-    def __init__(self, embedding_matrix, /, *args):
-        super(BiLSTM_CRF, self).__init__()
-        self.embedding = torch.nn.Embedding.from_pretrained(embedding_matrix)
-        # TO-BE-IMPLEMENTED
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        The forward pass of the model. Must return the log probabilities of the
-        output classes for each word for each sentence in the batch (assuming
-        BiLSTM-CRF works in the same way).
-        x.shape = (batch_size, max_sentence_length)
-        out.shape = (batch_size, max_sentence_length, num_classes)
-        """
-        # TO-BE-IMPLEMENTED
-        pass
 
 
 def load_dataset(dataset: str, embedding: str, verbose: bool) -> tuple[CustomDataset]:
@@ -412,7 +418,7 @@ def check_config(config: dict[str, Any]) -> None:
 
     criterion_err = "Invalid criterion. Must be 'NLLLoss', 'CrossEntropy', or 'CRF'."
     config["criterion"] = config.get("criterion", "").casefold()
-    assert config["criterion"] in ["nllloss", "crossentropy", "crf"], criterion_err
+    assert config["criterion"] in ["nllloss", "crossentropyloss", "crf"], criterion_err
 
     optimizer_err = "Invalid optimizer. Must be 'Adam', 'Adagrad', or 'SGD'."
     config["optimizer"] = config.get("optimizer", "").casefold()
@@ -436,7 +442,7 @@ def check_config(config: dict[str, Any]) -> None:
 
 def train(
         model: torch.nn.Module, train_loader: torch.utils.data.DataLoader, val_loader: torch.utils.data.DataLoader,
-        optimizer: torch.optim.Optimizer, criterion: torch.nn.Module, epochs: int, patience: int, verbose: bool
+        optimizer: torch.optim.Optimizer, criterion: torch.nn.Module, epochs: int, patience: int, verbose: bool, CRF:bool
     ) -> None:
     """
     Trains the given model using the given configurations. It is expected
@@ -453,32 +459,56 @@ def train(
     model.F1_SCORES = torch.zeros(epochs, 2)
 
     progress_bar = tqdm.tqdm(range(epochs), bar_format=r"{l_bar}{bar:15}{r_bar}")
+
     for epoch in progress_bar if verbose else range(epochs):
         model.train()
         train_loss, train_true, train_predicted = 0, [], []
         for data, labels in train_loader:
-            output = model(data).permute(0, 2, 1)
-            mask = (data != 0)
-            labels = labels * mask
-            output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
-            train_loss += (loss := criterion(output, labels)).item()
-            train_true.extend(labels.flatten().tolist())
-            train_predicted.extend(output.argmax(dim=1).flatten().tolist())
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
+            data, labels = data.to(device), labels.to(device)
+            # print("DATA:", data.shape)
+            # print("LABELS:", labels.shape)
+            if CRF:
+                lstm_out, scores, best_path = model(data)
+                loss = model.loss(data, labels)
+                train_loss += loss
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+                train_true.extend(labels.view(-1).tolist())
+                pred = torch.Tensor(best_path)
+                train_predicted.extend(pred.view(-1).tolist())
+            else:
+                output = model(data).permute(0, 2, 1)
+                mask = (data != 0)
+                labels = labels * mask
+                output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
+                train_loss += (loss := criterion(output, labels)).item()
+                train_true.extend(labels[mask].tolist())
+                train_predicted.extend(output.argmax(dim=1)[mask].tolist())
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
 
         model.eval()
         with torch.no_grad():
             val_loss, val_true, val_predicted = 0, [], []
             for data, labels in val_loader:
-                output = model(data).permute(0, 2, 1)
-                mask = (data != 0)
-                labels = labels * mask
-                output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
-                val_loss += (loss := criterion(output, labels)).item()
-                val_true.extend(labels.flatten().tolist())
-                val_predicted.extend(output.argmax(dim=1).flatten().tolist())
+                data, labels = data.to(device), labels.to(device)
+                if CRF:
+                    lstm_out, scores, best_path = model(data)
+                    loss = model.loss(data, labels)
+                    val_loss += loss
+                    val_true.extend(labels.view(-1).tolist())
+                    pred = torch.Tensor(best_path)
+                    val_predicted.extend(pred.view(-1).tolist())
+                else:
+                    output = model(data).permute(0, 2, 1)
+                    mask = (data != 0)
+                    labels = labels * mask
+                    output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
+                    val_loss += (loss := criterion(output, labels)).item()
+                    val_true.extend(labels[mask].tolist())
+                    val_predicted.extend(output.argmax(dim=1)[mask].tolist())
 
         model.LOSSES[epoch, 0] = train_loss / len(train_loader)
         model.LOSSES[epoch, 1] = val_loss / len(val_loader)
@@ -501,7 +531,7 @@ def train(
 
 
 def evaluate(
-        model: torch.nn.Module, dataloader: torch.utils.data.DataLoader, criterion: torch.nn.Module
+        model: torch.nn.Module, dataloader: torch.utils.data.DataLoader, criterion: torch.nn.Module, CRF: bool
     ) -> dict[str, float|torch.Tensor]:
     """
     Evaluates the given model using the given configurations. It is expected
@@ -516,13 +546,22 @@ def evaluate(
     with torch.no_grad():
         test_loss, test_true, test_predicted = 0, [], []
         for data, labels in dataloader:
-            output = model(data).permute(0, 2, 1)
-            mask = (data != 0)
-            labels = labels * mask
-            output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
-            test_loss += (loss := criterion(output, labels)).item()
-            test_true.extend(labels.flatten().tolist())
-            test_predicted.extend(output.argmax(dim=1).flatten().tolist())
+            if CRF:
+                lstm_out, scores, best_path = model(data)
+                loss = model.loss(data, labels)
+                test_loss += loss
+                test_true.extend(labels.view(-1).tolist())
+                pred = torch.Tensor(best_path)
+                test_predicted.extend(pred.view(-1).tolist())
+            else:
+                data, labels = data.to(device), labels.to(device)
+                output = model(data).permute(0, 2, 1)
+                mask = (data != 0)
+                labels = labels * mask
+                output = output * mask.unsqueeze(1).repeat(1, num_classes, 1).float()
+                test_loss += (loss := criterion(output, labels)).item()
+                test_true.extend(labels[mask].tolist())
+                test_predicted.extend(output.argmax(dim=1)[mask].tolist())
 
     test_details = {
         "loss": test_loss / len(dataloader),
@@ -530,7 +569,8 @@ def evaluate(
         "precision": metrics.precision_score(test_true, test_predicted, average="macro"),
         "recall": metrics.recall_score(test_true, test_predicted, average="macro"),
         "f1": metrics.f1_score(test_true, test_predicted, average="macro"),
-        "cf": metrics.confusion_matrix(test_true, test_predicted, normalize="true")
+        "cf": metrics.confusion_matrix(test_true, test_predicted, normalize="true"),
+        "class_wise_f1:": labelwise_f1(test_true, test_predicted, dataloader.dataset.encoder)
     }
 
     print(f"Test Loss: {test_details['loss']:.5f}")
@@ -575,6 +615,7 @@ def pipeline(config: dict[str, str|float|dict[str, int]]) -> dict[str, Any]:
     and a dictionary of evaluation metrics for the test set.
     """
 
+    print("CRF:", config["CRF"])
     check_config(config)
 
     train_set, test_set, val_set = load_dataset(config["dataset"], config["embedding"], config["verbose"])
@@ -594,6 +635,10 @@ def pipeline(config: dict[str, str|float|dict[str, int]]) -> dict[str, Any]:
     criterion = config["criterion"]
     criterion = {"nllloss": torch.nn.NLLLoss, "crossentropyloss": torch.nn.CrossEntropyLoss, "crf": None}[criterion]()
 
+    if(config['CRF']):
+        criterion = model.loss
+    print(criterion)
+
     optimizer = config["optimizer"]
     optimizer = {"adam": torch.optim.Adam, "adagrad": torch.optim.Adagrad, "sgd": torch.optim.SGD}[optimizer]
     optimizer = optimizer(model.parameters(), lr=config["lr"])
@@ -604,9 +649,9 @@ def pipeline(config: dict[str, str|float|dict[str, int]]) -> dict[str, Any]:
     model.to(config["device"])
     train(
         model, train_loader, val_loader, optimizer, criterion,
-        config["epochs"], config["early_stopping_patience"], config["verbose"]
+        config["epochs"], config["early_stopping_patience"], config["verbose"], config["CRF"]
     )
-    test_details = evaluate(model, test_loader, criterion)
+    test_details = evaluate(model, test_loader, criterion, config["CRF"])
     model_path = fr"Models/{run}.pt"
     torch.save(model.state_dict(), model_path)
     with open(fr"Models/{run}.pkl", "wb") as file:
@@ -628,16 +673,16 @@ def plot_learning_curve(model: torch.nn.Module) -> None:
     sns.set_theme(style="darkgrid")
 
     fig, ax = plt.subplots(1, 2, figsize=(15, 5))
-    ax[0].plot(model.LOSSES[:, 0], label="Train Loss")
-    ax[0].plot(model.LOSSES[:, 1], label="Validation Loss")
+    ax[0].plot(model.LOSSES[:, 0].detach().numpy(), label="Train Loss")
+    ax[0].plot(model.LOSSES[:, 1].detach().numpy(), label="Validation Loss")
     ax[0].set_title("Loss Curve")
     ax[0].set_xlabel("Epochs")
     ax[0].set_ylabel("Loss")
     ax[0].grid(True)
     ax[0].legend()
 
-    ax[1].plot(model.F1_SCORES[:, 0], label="Train F1-Score")
-    ax[1].plot(model.F1_SCORES[:, 1], label="Validation F1-Score")
+    ax[1].plot(model.F1_SCORES[:, 0].detach().numpy(), label="Train F1-Score")
+    ax[1].plot(model.F1_SCORES[:, 1].detach().numpy(), label="Validation F1-Score")
     ax[1].set_title("F1-Score Curve")
     ax[1].set_xlabel("Epochs")
     ax[1].set_ylabel("Macro F1-Score")
@@ -685,7 +730,8 @@ if __name__ == "__main__":
         ),
         early_stopping_patience=1,
         device="cpu",
-        verbose=True
+        verbose=True,
+        CRF=True
     )
     run = pipeline(CONFIG)
     # KEYS "model", "encoder", "train_loader", "test_loader", "val_loader", "accuracy",
