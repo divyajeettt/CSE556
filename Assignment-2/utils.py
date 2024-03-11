@@ -4,28 +4,12 @@ import tqdm
 import torch
 import gensim
 import pickle
+import numpy as np
 import seaborn as sns
 from typing import Any
 import matplotlib.pyplot as plt
-import sys
 import sklearn.metrics as metrics
 from sklearn.preprocessing import LabelEncoder
-import numpy as np
-from sklearn.metrics import f1_score
-
-
-def labelwise_f1(y_true, y_pred,label_encoder):
-    y_pred = label_encoder.inverse_transform(y_pred)
-    y_true = label_encoder.inverse_transform(y_true)
-    y_pred = [c.split('_')[1] if '_' in c else c for c in y_pred]
-    y_true = [c.split('_')[1] if '_' in c else c for c in y_true]
-    le = LabelEncoder()
-    le.fit(y_true+y_pred)
-    y_true = le.transform(y_true)
-    y_pred = le.transform(y_pred)
-    scores = f1_score(y_true, y_pred, average=None)
-    return dict(zip(le.classes_, scores))
-
 
 
 WordEmbedding = gensim.models.keyedvectors.KeyedVectors | gensim.models.fasttext.FastTextKeyedVectors
@@ -227,6 +211,7 @@ class GRU(torch.nn.Module):
         output = self.fc(output)
         return self.softmax(output)
 
+
 class BiLSTM_CRF(torch.nn.Module):
     """
     A class for the GRU model. The model can be used for both NER and ATE
@@ -244,13 +229,12 @@ class BiLSTM_CRF(torch.nn.Module):
         self.num_tags = output_size + 2
         self.start = self.num_tags-2
         self.end = self.start+1
-        
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.bilstm = torch.nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, bidirectional=True)
         self.projector = torch.nn.Linear(hidden_size * 2, self.num_tags)
         self.transitions = torch.nn.Parameter(torch.randn(self.num_tags, self.num_tags))
-    
+
     def forward_score(self,features):
         scores = torch.ones(features.shape[0], self.num_tags) * -6969
         scores[:,self.start] = 0
@@ -260,7 +244,7 @@ class BiLSTM_CRF(torch.nn.Module):
             scores = torch.logsumexp(score, dim=-1)
         scores = scores + self.transitions[self.end]
         return torch.logsumexp(scores, dim=-1)
-    
+
     def score_sentence(self,features,tags):
         scores = features.gather(2, tags.unsqueeze(2)).squeeze(2)
         start = torch.ones(features.shape[0],1,dtype=torch.long) * self.start
@@ -269,7 +253,7 @@ class BiLSTM_CRF(torch.nn.Module):
         last_tag = tags.gather(1,torch.ones(features.shape[0],1,dtype=torch.long) * features.shape[1])
         last_scores = self.transitions[self.end,last_tag]
         return (trans_scores + scores).sum(dim=1) + last_scores
-    
+
     def viterbi_decode(self,features):
         scores = torch.ones(features.shape[0], self.num_tags) * -6969
         ptrs = torch.zeros_like(features)
@@ -277,7 +261,6 @@ class BiLSTM_CRF(torch.nn.Module):
         for i in range(features.shape[1]):
             feat = features[:,i]
             score = scores.unsqueeze(1) + self.transitions
-
             score, ptrs[:,i,:] = score.max(dim=-1)
             score += feat
             scores = score
@@ -295,7 +278,7 @@ class BiLSTM_CRF(torch.nn.Module):
             best_path.pop()
             best_paths.append(best_path[::-1])
         return scores, best_paths
-    
+
     def forward(self,x):
         x = self.embedding(x)
         hidden = (
@@ -312,6 +295,19 @@ class BiLSTM_CRF(torch.nn.Module):
         forward_score = self.forward_score(features)
         gold_score = self.score_sentence(features,tags.long())
         return (forward_score - gold_score).mean()
+
+
+def labelwise_f1(y_true, y_pred, label_encoder) -> dict[str, float]:
+    y_pred = label_encoder.inverse_transform(y_pred)
+    y_true = label_encoder.inverse_transform(y_true)
+    y_pred = [c.split('_')[1] if '_' in c else c for c in y_pred]
+    y_true = [c.split('_')[1] if '_' in c else c for c in y_true]
+    le = LabelEncoder()
+    le.fit(y_true+y_pred)
+    y_true = le.transform(y_true)
+    y_pred = le.transform(y_pred)
+    scores = metrics.f1_score(y_true, y_pred, average=None)
+    return dict(zip(le.classes_, scores))
 
 
 def load_dataset(dataset: str, embedding: str, verbose: bool) -> tuple[CustomDataset]:
