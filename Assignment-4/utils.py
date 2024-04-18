@@ -88,7 +88,6 @@ class ModelTransformer(torch.nn.Module):
         self.fc = torch.nn.Linear(768, 128)
         self.fc2 = torch.nn.Linear(128, 7) if task == 2 else torch.nn.Linear(128, 2)
         self.dropout = torch.nn.Dropout(0.1)
-        self.activation = activation
 
     def forward(self,x):
         '''
@@ -110,8 +109,8 @@ class ModelTransformer(torch.nn.Module):
 
 
 class ModelGRU(ModelTransformer):
-    def __init__(self, activation="softmax"):
-        super(ModelGRU, self).__init__(activation=activation)
+    def __init__(self, activation="softmax",task=2):
+        super(ModelGRU, self).__init__(task=2)
         self.seq_layer = torch.nn.GRU(768, 768)
 
 
@@ -133,7 +132,7 @@ def train(train_dataset, val_dataset, model, num_epochs=10, lr=1e-4, device='cud
         total_loss = 0
         for x, y in tqdm(train_dataset):
             x = {k: v.to(device) for k, v in x.items()}
-            y = torch.from_numpy(y).to(device)
+            y = torch.from_numpy(y).to(device).type(torch.uint8)
             y = y if task == 1 else y.to(torch.uint8)
             if torch.sum(y.isnan()).item():
                 continue
