@@ -31,7 +31,7 @@ class MELD(torch.utils.data.Dataset):
 
     def __getitem__(self,idx):
         if self.EFR:
-            return self.utterances[idx], np.array(self.triggers[idx], dtype=np.float32)
+            return self.utterances[idx], np.array(self.triggers[idx])
         return self.utterances[idx], self.emotions[idx]
 
 
@@ -80,14 +80,13 @@ class TransformerBlock(torch.nn.Module):
 
 
 class ModelTransformer(torch.nn.Module):
-    def __init__(self, activation="softmax"):
+    def __init__(self, task=1):
         super(ModelTransformer, self).__init__()
         self.bert = BertModel.from_pretrained('bert-base-uncased')
         self.bert.eval()
         self.seq_layer = TransformerBlock()
         self.fc = torch.nn.Linear(768, 128)
-        # self.fc2 = torch.nn.Linear(128, 7) if activation == "softmax" else torch.nn.Linear(128, 1)
-        self.fc2 = torch.nn.Linear(128, 7) if activation == "softmax" else torch.nn.Linear(128, 2)
+        self.fc2 = torch.nn.Linear(128, 7) if task == 2 else torch.nn.Linear(128, 2)
         self.dropout = torch.nn.Dropout(0.1)
         self.activation = activation
 
@@ -106,7 +105,7 @@ class ModelTransformer(torch.nn.Module):
         x = torch.tanh(x)
         x = self.dropout(x)
         x = self.fc2(x)
-        x = torch.softmax(x, dim=1) #if self.activation == "softmax" else torch.sigmoid(x)
+        x = torch.softmax(x, dim=1)
         return x
 
 
@@ -116,11 +115,11 @@ class ModelGRU(ModelTransformer):
         self.seq_layer = torch.nn.GRU(768, 768)
 
 
-def train(train_dataset, val_dataset, model, num_epochs=10, lr=1e-4, device='cuda', loss_type="CE"):
-    # if loss_type == "CE":
-    loss_fn = torch.nn.CrossEntropyLoss().to(device)
-    # else:
-    #     loss_fn = torch.nn.MSELoss().to(device)
+def train(train_dataset, val_dataset, model, num_epochs=10, lr=1e-4, device='cuda', task=1):
+    if task == 2:
+        loss_fn = torch.nn.CrossEntropyLoss(weight=torch.tensor([0.05, 1])).to(device)
+    else:
+        loss_fn = torch.nn.CrossEntropyLoss().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     model = model.to(device)
     train_losses = []
@@ -135,9 +134,9 @@ def train(train_dataset, val_dataset, model, num_epochs=10, lr=1e-4, device='cud
         for x, y in tqdm(train_dataset):
             x = {k: v.to(device) for k, v in x.items()}
             y = torch.from_numpy(y).to(device)
+            y = y if task == 1 else y.to(torch.uint8)
             if torch.sum(y.isnan()).item():
                 continue
-            # y = y if loss_type == "CE" else y.unsqueeze(1)
             optimizer.zero_grad()
             y_pred = model(x)
             loss = loss_fn(y_pred, y).mean()
@@ -145,16 +144,11 @@ def train(train_dataset, val_dataset, model, num_epochs=10, lr=1e-4, device='cud
             optimizer.step()
             total_loss += loss.cpu().detach().item()
             true_ys.append(y.cpu().detach().numpy())
-            # if loss_type == "CE":
             pred_ys.append(y_pred.argmax(dim=1).cpu().detach().numpy())
-            # else:
-                # y_pred = y_pred.cpu().detach().numpy()
-                # y_pred = np.where(y_pred > 0.5, 1, 0)
-                # pred_ys.append(y_pred)
         train_losses.append(total_loss/len(train_dataset))
         true_ys = np.concatenate(true_ys)
         pred_ys = np.concatenate(pred_ys)
-        train_f1s.append(f1_score(true_ys, pred_ys, average='weighted' if loss_type == "CE" else 'binary'))
+        train_f1s.append(f1_score(true_ys, pred_ys, average='weighted'))
         val_loss = 0
         true_ys = []
         pred_ys = []
@@ -164,23 +158,18 @@ def train(train_dataset, val_dataset, model, num_epochs=10, lr=1e-4, device='cud
             for x, y in tqdm(val_dataset):
                 x = {k: v.to(device) for k, v in x.items()}
                 y = torch.from_numpy(y).to(device)
+                y = y if task == 1 else y.to(torch.uint8)
                 if torch.sum(y.isnan()).item():
                     continue
-                # y = y if loss_type == "CE" else y.unsqueeze(1)
                 y_pred = model(x)
                 loss = loss_fn(y_pred, y).mean()
                 val_loss += loss.cpu().detach().item()
                 true_ys.append(y.cpu().detach().numpy())
-                # if loss_type == "CE":
                 pred_ys.append(y_pred.argmax(dim=1).cpu().detach().numpy())
-                # else:
-                    # y_pred = y_pred.cpu().detach().numpy()
-                    # y_pred = np.where(y_pred > 0.5, 1, 0)
-                    # pred_ys.append(y_pred)
             val_losses.append(val_loss/len(val_dataset))
             true_ys = np.concatenate(true_ys)
             pred_ys = np.concatenate(pred_ys)
-            val_f1s.append(f1_score(true_ys, pred_ys, average='weighted' if loss_type == "CE" else 'binary'))
+            val_f1s.append(f1_score(true_ys, pred_ys, average='weighted'))
         print(f'Epoch {i} Train Loss : {train_losses[-1]} Val Loss : {val_losses[-1]} Train F1 : {train_f1s[-1]} Val F1 : {val_f1s[-1]}')
         torch.save(model.state_dict(), 'model.pt')
     return train_losses, val_losses, train_f1s, val_f1s
