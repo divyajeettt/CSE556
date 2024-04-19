@@ -31,7 +31,7 @@ class MELD(torch.utils.data.Dataset):
 
     def __getitem__(self,idx):
         if self.EFR:
-            return self.utterances[idx], np.array(self.triggers[idx])
+            return self.utterances[idx], np.array(self.triggers[idx], dtype=np.float32)
         return self.utterances[idx], self.emotions[idx]
 
 
@@ -59,7 +59,6 @@ class TransformerBlock(torch.nn.Module):
         self.query = torch.nn.Linear(768, 768)
         self.value = torch.nn.Linear(768, 768)
         self.layer_norm = torch.nn.LayerNorm(768)
-        self.dropout = torch.nn.Dropout(0.1)
         self.attention = torch.nn.MultiheadAttention(768, 8)
         self.fc = torch.nn.Linear(768, 768)
         self.pos_emb = PositionalEncoding(768, max_len=100)
@@ -86,9 +85,8 @@ class ModelTransformer(torch.nn.Module):
         self.bert.eval()
         self.seq_layer = TransformerBlock()
         self.fc = torch.nn.Linear(768, 128)
-        self.fc2 = torch.nn.Linear(128, 7) if task == 2 else torch.nn.Linear(128, 2)
+        self.fc2 = torch.nn.Linear(128, 7) if task == 1 else torch.nn.Linear(128, 2)
         self.dropout = torch.nn.Dropout(0.1)
-        self.activation = activation
 
     def forward(self,x):
         '''
@@ -110,16 +108,14 @@ class ModelTransformer(torch.nn.Module):
 
 
 class ModelGRU(ModelTransformer):
-    def __init__(self, activation="softmax"):
-        super(ModelGRU, self).__init__(activation=activation)
+    def __init__(self, task=1):
+        super(ModelGRU, self).__init__(task=task)
         self.seq_layer = torch.nn.GRU(768, 768)
 
 
 def train(train_dataset, val_dataset, model, num_epochs=10, lr=1e-4, device='cuda', task=1):
-    if task == 2:
-        loss_fn = torch.nn.CrossEntropyLoss(weight=torch.tensor([0.05, 1])).to(device)
-    else:
-        loss_fn = torch.nn.CrossEntropyLoss().to(device)
+    weight = None if task == 1 else torch.tensor([0.05, 1]).to(device)
+    loss_fn = torch.nn.CrossEntropyLoss(weight=weight).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     model = model.to(device)
     train_losses = []
