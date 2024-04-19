@@ -129,7 +129,7 @@ def train(train_dataset, val_dataset, model, num_epochs=10, lr=1e-4, device='cud
         total_loss = 0
         for x, y in tqdm(train_dataset):
             x = {k: v.to(device) for k, v in x.items()}
-            y = torch.from_numpy(y).to(device)
+            y = torch.from_numpy(y).to(device).type(torch.uint8)
             y = y if task == 1 else y.to(torch.uint8)
             if torch.sum(y.isnan()).item():
                 continue
