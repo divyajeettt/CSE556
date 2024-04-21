@@ -24,12 +24,11 @@ class MELD(torch.utils.data.Dataset):
         self.label_encoder = LabelEncoder()
         self.label_encoder.fit(np.concatenate(self.emotions))
         self.emotions = [self.label_encoder.transform(e) for e in self.emotions]
-        self.num_classes = len(self.label_encoder.classes_)
 
     def __len__(self):
         return len(self.utterances)
 
-    def __getitem__(self,idx):
+    def __getitem__(self, idx):
         if self.EFR:
             return self.utterances[idx], np.array(self.triggers[idx], dtype=np.float32)
         return self.utterances[idx], self.emotions[idx]
@@ -169,3 +168,21 @@ def train(train_dataset, val_dataset, model, num_epochs=10, lr=1e-4, device='cud
         print(f'Epoch {i} Train Loss : {train_losses[-1]} Val Loss : {val_losses[-1]} Train F1 : {train_f1s[-1]} Val F1 : {val_f1s[-1]}')
         torch.save(model.state_dict(), 'model.pt')
     return train_losses, val_losses, train_f1s, val_f1s
+
+
+def run_model(model, dataset, device='cuda', task=1):
+    true_ys = []
+    pred_ys = []
+    with torch.no_grad():
+        for x, y in tqdm(dataset):
+            x = {k: v.to(device) for k, v in x.items()}
+            y = torch.from_numpy(y).to(device)
+            y = y if task == 1 else y.to(torch.uint8)
+            if torch.sum(y.isnan()).item():
+                continue
+            y_pred = model(x)
+            true_ys.append(y.cpu().detach().numpy())
+            pred_ys.append(y_pred.argmax(dim=1).cpu().detach().numpy())
+        true_ys = np.concatenate(true_ys)
+        pred_ys = np.concatenate(pred_ys)
+    return true_ys, pred_ys, f1_score(true_ys, pred_ys, average='weighted')
