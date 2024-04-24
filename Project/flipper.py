@@ -2,7 +2,7 @@ import json
 import pandas as pd
 
 
-class GenderMap:
+class Flipper:
     mapping: dict[str, str]
 
     def __init__(self, path: str):
@@ -46,5 +46,5 @@ class GenderMap:
 
 
 if __name__ == "__main__":
-    gm = GenderMap("gendered_words/gendered_words.json")
+    gm = Flipper("gendered_words/gendered_words.json")
     print(gm.map["her"])
