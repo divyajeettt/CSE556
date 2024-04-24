@@ -1,7 +1,10 @@
 import json
+import pandas as pd
 
 
 class GenderMap:
+    mapping: dict[str, str]
+
     def __init__(self, path: str):
         with open(path) as file:
             json_data = json.loads(file.read())
@@ -21,10 +24,25 @@ class GenderMap:
             except KeyError:
                 pass
 
+    def __getitem__(self, key: str) -> str:
+        return self.mapping.get(key, key)
+
+    def is_gendered(self, sentence: str) -> bool:
+        for word in sentence.split():
+            if word in self.mapping:
+                return True
+        return False
+
     def flip(self, sentence: str) -> str:
-        words = sentence.split(" ")
-        flipped_words = [self.mapping.get(word, word) for word in words]
+        words = sentence.split()
+        flipped_words = [self[word] for word in words]
         return " ".join(flipped_words)
+
+    def flip_series(self, sentences: pd.Series) -> pd.Series:
+        output = pd.Series(dtype="object")
+        for i, sentence in sentences.items():
+            output.at[i] = self.flip(sentence)
+        return output
 
 
 if __name__ == "__main__":
