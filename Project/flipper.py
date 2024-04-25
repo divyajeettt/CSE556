@@ -1,6 +1,6 @@
 import json
 import pandas as pd
-
+import torch
 
 class Flipper:
     mapping: dict[str, str]
@@ -37,6 +37,12 @@ class Flipper:
         words = sentence.split()
         flipped_words = [self[word] for word in words]
         return " ".join(flipped_words)
+    
+    def flip_label(self,sentence: str):
+        words = sentence.split()
+        flipped_words = [self[word]==word for word in words]
+        return flipped_words
+
 
     def flip_series(self, sentences: pd.Series) -> pd.Series:
         output = pd.Series(dtype="object")
@@ -44,6 +50,20 @@ class Flipper:
             output.at[i] = self.flip(sentence)
         return output
 
+    def process_tokenizer(self, tokenizer):
+        self.token_mapping = dict()
+        for k,v in self.mapping.items():
+            k_id = tokenizer.convert_tokens_to_ids(k)
+            v_id = tokenizer.convert_tokens_to_ids(v)
+            self.token_mapping[k_id] = v_id
+
+    def process_tensor(self, tensor):
+        mask = torch.zeros_like(tensor)
+        for i in range(len(tensor)):
+            for j in range(len(tensor[i])):
+                if tensor[i][j] in self.token_mapping:
+                    mask[i][j] = 1
+        return mask
 
 if __name__ == "__main__":
     gm = Flipper("gendered_words/gendered_words.json")
