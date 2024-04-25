@@ -11,7 +11,7 @@ class MELD(torch.utils.data.Dataset):
     def __init__(self, path, EFR=False):
         self.EFR = EFR
         data = json.loads(open(path).read())
-        tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+        tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
         self.utterances = []
         self.emotions = []
         self.triggers = []
